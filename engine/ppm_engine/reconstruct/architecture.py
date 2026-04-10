@@ -77,7 +77,7 @@ class ArchitectureReconstructor:
         exports = self._get_exports(file_info)
         file_format = self._get_attr(file_info, "format", "unknown")
 
-        driver_type = self.classify_driver(imports)
+        driver_type = self.classify_driver(imports, file_format)
         callbacks = self._identify_callbacks(imports, chains)
         self_protection = self.detect_self_protection(depgraph, file_info)
         attack_chain = self._extract_attack_chain(chains)
@@ -98,14 +98,17 @@ class ArchitectureReconstructor:
             "strings_of_interest": strings_of_interest,
         }
 
-    def classify_driver(self, imports: dict) -> str:
-        """Classify driver type based on import patterns."""
+    def classify_driver(self, imports: dict, file_format: str = "") -> str:
+        """Classify binary type based on import patterns and file format."""
         all_funcs = set()
         for dll, funcs in imports.items():
             if isinstance(funcs, list):
                 all_funcs.update(funcs)
             elif isinstance(funcs, dict):
                 all_funcs.update(funcs.values())
+
+        is_driver = "DRIVER" in file_format.upper()
+        is_dll = "DLL" in file_format.upper()
 
         has_ob_register = "ObRegisterCallbacks" in all_funcs
         has_cm_register = (
@@ -145,7 +148,12 @@ class ArchitectureReconstructor:
         if has_apc:
             return "apc_injector"
 
-        return "generic_driver"
+        if is_driver:
+            return "generic_driver"
+        elif is_dll:
+            return "generic_library"
+        else:
+            return "generic_executable"
 
     def detect_self_protection(self, depgraph, file_info) -> list[str]:
         """Identify self-protection mechanisms."""
