@@ -1,6 +1,6 @@
 [project]
 name = "ppm-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "Paradex Process Monitor - Python analysis engine"
 requires-python = ">=3.10"
 dependencies = [
