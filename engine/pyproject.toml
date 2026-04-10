@@ -1,6 +1,6 @@
 [project]
 name = "ppm-engine"
-version = "0.2.0"
+version = "0.2.1"
 description = "Binary analysis engine -- reconstruct architecture from compiled binaries in seconds"
 readme = "README.md"
 license = {text = "MIT"}
