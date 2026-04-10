@@ -205,7 +205,7 @@ class ArchitectureReconstructor:
                 nodes = depgraph["nodes"]
 
             for nid, attrs in nodes.items():
-                label = attrs.get("label", attrs.get("name", ""))
+                label = self._get_attr(attrs, "label", "") or self._get_attr(attrs, "name", "") or ""
                 # ActiveProcessLinks offset on Win10 x64 = 0x448
                 if "0x448" in str(attrs) or "0x2f0" in str(attrs):
                     msg = "Writes to EPROCESS offset (potential DKOM)"

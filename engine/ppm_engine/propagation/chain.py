@@ -111,24 +111,62 @@ class ChainTracer:
     # ----------------------------------------------------------
 
     def _get_nodes(self) -> dict:
-        """Return node dict from graph, tolerating various representations."""
+        """Return node dict: id -> {label, node_type, address, ...}."""
         if self.graph is None:
             return {}
+        raw = None
         if hasattr(self.graph, "nodes"):
-            return self.graph.nodes if isinstance(self.graph.nodes, dict) else {}
-        if isinstance(self.graph, dict) and "nodes" in self.graph:
-            return self.graph["nodes"]
-        return {}
+            raw = self.graph.nodes
+        elif isinstance(self.graph, dict) and "nodes" in self.graph:
+            raw = self.graph["nodes"]
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        # Adapt: if values are dataclass/objects with .label, convert to dicts
+        result = {}
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                result[k] = v
+            elif hasattr(v, "__dataclass_fields__"):
+                from dataclasses import asdict
+                result[k] = asdict(v)
+            elif hasattr(v, "label"):
+                result[k] = {"label": v.label, "node_type": getattr(v, "node_type", ""),
+                             "address": getattr(v, "address", 0)}
+            else:
+                result[k] = {"label": str(v)}
+        return result
 
     def _get_edges(self) -> dict:
-        """Return edge adjacency from graph."""
+        """Return edge adjacency: source_id -> [{target, action, detail}, ...]."""
         if self.graph is None:
             return {}
+        raw = None
         if hasattr(self.graph, "edges"):
-            return self.graph.edges if isinstance(self.graph.edges, dict) else {}
-        if isinstance(self.graph, dict) and "edges" in self.graph:
-            return self.graph["edges"]
-        return {}
+            raw = self.graph.edges
+        elif isinstance(self.graph, dict) and "edges" in self.graph:
+            raw = self.graph["edges"]
+        if raw is None:
+            return {}
+        # If already adjacency dict, return as-is
+        if isinstance(raw, dict):
+            return raw
+        # If list of Edge dataclasses or dicts, build adjacency
+        adj: dict[str, list[dict]] = {}
+        for e in raw:
+            if isinstance(e, dict):
+                src = e.get("src", "")
+                entry = {"target": e.get("dst", ""), "action": e.get("edge_type", "calls"),
+                         "detail": e.get("detail", "")}
+            elif hasattr(e, "src"):
+                src = e.src
+                entry = {"target": e.dst, "action": getattr(e, "edge_type", "calls"),
+                         "detail": getattr(e, "metadata", {}).get("detail", "") if isinstance(getattr(e, "metadata", None), dict) else ""}
+            else:
+                continue
+            adj.setdefault(src, []).append(entry)
+        return adj
 
     def _successors(self, node_id: str) -> list[dict]:
         """Return outgoing edges from *node_id*."""

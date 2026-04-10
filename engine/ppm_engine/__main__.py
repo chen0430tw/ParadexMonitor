@@ -33,34 +33,44 @@ except ImportError:
     _bridges_available = False
 
 try:
-    from .topology.callgraph import build_callgraph  # type: ignore[import-untyped]
-except ImportError:
-    build_callgraph = None  # type: ignore[assignment]
-
-try:
-    from .topology.coupling import build_coupling  # type: ignore[import-untyped]
-except ImportError:
-    build_coupling = None  # type: ignore[assignment]
-
-try:
-    from .adapters.pe import PEAdapter  # type: ignore[import-untyped]
+    from .adapters.pe import PEAdapter
 except ImportError:
     PEAdapter = None  # type: ignore[assignment]
 
 try:
-    from .adapters.elf import ELFAdapter  # type: ignore[import-untyped]
+    from .adapters.elf import ELFAdapter
 except ImportError:
     ELFAdapter = None  # type: ignore[assignment]
 
 try:
-    from .unpack.detect import is_packed  # type: ignore[import-untyped]
+    from .unpack.detect import detect_packer
 except ImportError:
-    is_packed = None  # type: ignore[assignment]
+    detect_packer = None  # type: ignore[assignment]
 
 try:
-    from .propagation import propagate  # type: ignore[import-untyped]
+    from .topology.callgraph import CallGraph
 except ImportError:
-    propagate = None  # type: ignore[assignment]
+    CallGraph = None  # type: ignore[assignment]
+
+try:
+    from .depgraph.build import DepGraphBuilder
+except ImportError:
+    DepGraphBuilder = None  # type: ignore[assignment]
+
+try:
+    from .patterns.base import PatternEngine
+except ImportError:
+    PatternEngine = None  # type: ignore[assignment]
+
+try:
+    from .propagation.chain import ChainTracer
+except ImportError:
+    ChainTracer = None  # type: ignore[assignment]
+
+try:
+    from .reconstruct.architecture import ArchitectureReconstructor
+except ImportError:
+    ArchitectureReconstructor = None  # type: ignore[assignment]
 
 # --- Bridge Manager singleton ---
 
@@ -106,7 +116,7 @@ def _handle_detect(req: dict) -> dict:
 
 
 def _handle_analyze(req: dict) -> dict:
-    """Full pipeline: detect -> unpack check -> adapt -> callgraph -> depgraph -> patterns -> reconstruct."""
+    """Full pipeline: detect -> unpack -> adapt -> callgraph -> depgraph -> patterns -> chains -> reconstruct."""
     path = req.get("path", "")
     if not path:
         return {"error": "missing 'path'"}
@@ -118,19 +128,18 @@ def _handle_analyze(req: dict) -> dict:
         return {"error": "detect module not available"}
     info = detect(path)
     result["stages"]["detect"] = asdict(info)
-
     if info.format == "NOT_FOUND":
         return {"error": f"file not found: {path}"}
 
     # Stage 2: unpack check
-    if is_packed is not None:
+    if detect_packer is not None:
         try:
-            packed_result = is_packed(path)
-            result["stages"]["unpack"] = {"packed": packed_result}
+            pack_info = detect_packer(path)
+            result["stages"]["unpack"] = pack_info
         except Exception as e:
             result["stages"]["unpack"] = {"error": str(e)}
     else:
-        result["stages"]["unpack"] = {"skipped": True, "reason": "unpack module not available"}
+        result["stages"]["unpack"] = {"skipped": True, "reason": "unpack.detect not available"}
 
     # Stage 3: build adapter
     adapter = None
@@ -138,7 +147,13 @@ def _handle_analyze(req: dict) -> dict:
     if fmt.startswith("PE") and PEAdapter is not None:
         try:
             adapter = PEAdapter(path)
-            result["stages"]["adapter"] = {"type": "PE", "loaded": True}
+            result["stages"]["adapter"] = {
+                "type": "PE",
+                "imports": {k: len(v) for k, v in adapter.imports().items()},
+                "iat_calls": len(adapter.iat_calls()),
+                "strings": len(adapter.strings()),
+                "is_driver": adapter.is_driver(),
+            }
         except Exception as e:
             result["stages"]["adapter"] = {"type": "PE", "error": str(e)}
     elif fmt.startswith("ELF") and ELFAdapter is not None:
@@ -151,39 +166,83 @@ def _handle_analyze(req: dict) -> dict:
         result["stages"]["adapter"] = {"skipped": True, "reason": f"no adapter for {fmt}"}
 
     # Stage 4: callgraph
-    if build_callgraph is not None and adapter is not None:
+    cg = None
+    if CallGraph is not None and adapter is not None:
         try:
-            cg = build_callgraph(adapter)
-            result["stages"]["callgraph"] = {"nodes": len(cg) if hasattr(cg, '__len__') else "built"}
+            cg = CallGraph.from_pe(adapter)
+            result["stages"]["callgraph"] = {
+                "functions": len(cg.functions),
+                "roots": len(cg.roots()),
+                "leaves": len(cg.leaves()),
+            }
         except Exception as e:
             result["stages"]["callgraph"] = {"error": str(e)}
     else:
-        result["stages"]["callgraph"] = {"skipped": True}
+        result["stages"]["callgraph"] = {"skipped": True, "reason": "CallGraph or adapter not available"}
 
-    # Stage 5: coupling / depgraph
-    if build_coupling is not None and adapter is not None:
+    # Stage 5: depgraph
+    graph = None
+    if DepGraphBuilder is not None and cg is not None and adapter is not None:
         try:
-            dep = build_coupling(adapter)
-            result["stages"]["depgraph"] = {"nodes": len(dep) if hasattr(dep, '__len__') else "built"}
+            builder = DepGraphBuilder()
+            graph = builder.build(cg, adapter)
+            result["stages"]["depgraph"] = {
+                "nodes": len(graph.nodes),
+                "edges": len(graph.edges),
+            }
         except Exception as e:
             result["stages"]["depgraph"] = {"error": str(e)}
     else:
-        result["stages"]["depgraph"] = {"skipped": True}
+        result["stages"]["depgraph"] = {"skipped": True, "reason": "DepGraphBuilder, callgraph, or adapter not available"}
 
-    # Stage 6: patterns (placeholder)
-    result["stages"]["patterns"] = {"skipped": True, "reason": "pattern matching not yet implemented"}
+    # Stage 6: pattern matching
+    if PatternEngine is not None and adapter is not None:
+        try:
+            engine = PatternEngine()
+            engine.register_defaults()
+            matches = engine.scan_all(adapter, cg, graph)
+            result["stages"]["patterns"] = {
+                "matches": [
+                    {"pattern": m.pattern_name, "confidence": m.confidence,
+                     "location": hex(m.location), "description": m.description}
+                    for m in matches
+                ]
+            }
+        except Exception as e:
+            result["stages"]["patterns"] = {"error": str(e)}
+    else:
+        result["stages"]["patterns"] = {"skipped": True, "reason": "PatternEngine or adapter not available"}
 
     # Stage 7: propagation / chains
-    if propagate is not None and adapter is not None:
+    if ChainTracer is not None and graph is not None:
         try:
-            chains = propagate(adapter)
-            result["stages"]["chains"] = {"count": len(chains) if hasattr(chains, '__len__') else "built"}
+            tracer = ChainTracer(graph)
+            chains = tracer.all_interesting_chains()
+            result["stages"]["chains"] = {
+                "count": len(chains),
+                "chains": [c.to_dict() for c in chains[:20]],  # cap at 20
+            }
         except Exception as e:
             result["stages"]["chains"] = {"error": str(e)}
     else:
-        result["stages"]["chains"] = {"skipped": True}
+        result["stages"]["chains"] = {"skipped": True, "reason": "ChainTracer or depgraph not available"}
 
-    # Architecture summary
+    # Stage 8: architecture reconstruction
+    if ArchitectureReconstructor is not None and adapter is not None:
+        try:
+            recon = ArchitectureReconstructor()
+            arch = recon.summarize(
+                asdict(info),
+                graph,
+                result["stages"].get("chains", {}).get("chains", [])
+            )
+            result["stages"]["architecture"] = arch
+        except Exception as e:
+            result["stages"]["architecture"] = {"error": str(e)}
+    else:
+        result["stages"]["architecture"] = {"skipped": True}
+
+    # Top-level summary
     result["summary"] = {
         "format": info.format,
         "arch": info.arch,
@@ -191,6 +250,9 @@ def _handle_analyze(req: dict) -> dict:
         "entry_point": hex(info.entry_point) if info.entry_point else "0x0",
         "sections": len(info.sections),
         "import_dlls": len(info.imports),
+        "stages_completed": sum(1 for s in result["stages"].values()
+                                if not (isinstance(s, dict) and s.get("skipped"))),
+        "stages_total": len(result["stages"]),
     }
 
     return result
@@ -201,9 +263,10 @@ def _handle_depgraph(req: dict) -> dict:
     query = req.get("query", "")
     if not path:
         return {"error": "missing 'path'"}
-
     if detect is None:
         return {"error": "detect module not available"}
+    if CallGraph is None or DepGraphBuilder is None:
+        return {"error": "topology/depgraph modules not available"}
 
     info = detect(path)
     if info.format == "NOT_FOUND":
@@ -211,39 +274,43 @@ def _handle_depgraph(req: dict) -> dict:
 
     # Build adapter
     adapter = None
-    fmt = info.format
-    if fmt.startswith("PE") and PEAdapter is not None:
-        try:
-            adapter = PEAdapter(path)
-        except Exception as e:
-            return {"error": f"PE adapter failed: {e}"}
-    elif fmt.startswith("ELF") and ELFAdapter is not None:
-        try:
-            adapter = ELFAdapter(path)
-        except Exception as e:
-            return {"error": f"ELF adapter failed: {e}"}
-
+    if info.format.startswith("PE") and PEAdapter is not None:
+        adapter = PEAdapter(path)
+    elif info.format.startswith("ELF") and ELFAdapter is not None:
+        adapter = ELFAdapter(path)
     if adapter is None:
-        return {"error": f"no adapter for format {fmt}"}
-
-    if build_coupling is None:
-        return {"error": "depgraph/coupling module not available"}
+        return {"error": f"no adapter for {info.format}"}
 
     try:
-        graph = build_coupling(adapter)
-        result = {"status": "ok", "command": "depgraph", "path": path}
+        cg = CallGraph.from_pe(adapter)
+        graph = DepGraphBuilder().build(cg, adapter)
+        result: dict = {"status": "ok", "command": "depgraph", "path": path,
+                        "nodes": len(graph.nodes), "edges": len(graph.edges)}
+
         if query:
             result["query"] = query
-            # Basic query: return node neighbors
-            if hasattr(graph, 'get'):
-                result["result"] = graph.get(query, [])
+            q = query.strip()
+            if q.startswith("who_registers"):
+                arg = q.split(None, 1)[1] if " " in q else ""
+                result["result"] = graph.who_registers(arg)
+            elif q.startswith("find_sinks"):
+                arg = q.split(None, 1)[1] if " " in q else ""
+                chains = graph.find_sinks(arg)
+                result["result"] = [list(c) for c in chains[:20]]
+            elif q.startswith("impact_of"):
+                arg = q.split(None, 1)[1] if " " in q else ""
+                result["result"] = graph.impact_of(arg)
+            elif q.startswith("trace_from"):
+                arg = q.split(None, 1)[1] if " " in q else ""
+                result["result"] = graph.trace_from(arg)
             else:
-                result["result"] = str(graph)
+                result["result"] = {"error": f"unknown query: {q}"}
         else:
-            result["result"] = str(graph) if not isinstance(graph, dict) else graph
+            result["ascii"] = graph.to_ascii()
+
         return result
     except Exception as e:
-        return {"error": f"depgraph build failed: {e}"}
+        return {"error": f"depgraph failed: {e}"}
 
 
 def _handle_bridges(req: dict) -> dict:
