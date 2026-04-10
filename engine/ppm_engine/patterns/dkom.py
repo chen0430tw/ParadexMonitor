@@ -42,16 +42,17 @@ _EPROCESS_OFFSETS = {
     },
 }
 
-# String indicators of DKOM activity
+# String indicators of DKOM activity.
+# NOTE: PsInitialSystemProcess and NtBuildNumber are excluded because they
+# are used by almost every non-trivial driver for legitimate purposes
+# (system process reference, OS version checking).
 _DKOM_STRING_INDICATORS = [
     "PsLoadedModuleList",
     "MmUnloadedDrivers",
     "PiDDBCacheTable",
     "MiRememberUnloadedDriver",
     "ActiveProcessLinks",
-    "PsInitialSystemProcess",
     "PsActiveProcessHead",
-    "NtBuildNumber",
     "KeServiceDescriptorTable",
 ]
 
@@ -106,21 +107,33 @@ class DkomPattern(Pattern):
         indicators: list[str] = []
 
         if dkom_strings:
-            # Strings referencing kernel structures used in DKOM
+            # Strings referencing kernel structures used in DKOM -- strong evidence
             confidence += 0.3
             indicators.append(
-                f"References to DKOM targets: {', '.join(set(dkom_strings)[:5])}"
+                f"References to DKOM targets: {', '.join(list(set(dkom_strings))[:5])}"
             )
 
         if has_dynamic_resolve:
-            confidence += 0.2
+            # MmGetSystemRoutineAddress alone is weak evidence -- almost every
+            # non-trivial driver imports it for version-compatible API lookups.
+            confidence += 0.1
             indicators.append(
                 "Uses MmGetSystemRoutineAddress for dynamic API resolution"
             )
 
         if offset_hits:
-            confidence += 0.4
-            for hit in offset_hits:
+            # Offset write detection alone is unreliable -- small values like
+            # 0x2E8, 0x448 appear constantly as stack/struct offsets in normal
+            # code. Only boost confidence when combined with other evidence.
+            if dkom_strings:
+                # Strong: DKOM strings + offset writes = confirmed DKOM
+                confidence += 0.3
+            elif has_dynamic_resolve:
+                # Moderate: dynamic resolve + offsets = plausible DKOM
+                confidence += 0.15
+            # offset_hits alone contribute nothing (too many false positives)
+
+            for hit in offset_hits[:5]:
                 indicators.append(
                     f"Writes to EPROCESS offset 0x{hit['offset']:X} at RVA 0x{hit['rva']:X} "
                     f"(possible {hit['field']} manipulation)"
@@ -139,16 +152,18 @@ class DkomPattern(Pattern):
         has_piddb = any("PiDDBCacheTable" in s for s in dkom_strings)
 
         if has_module_list:
-            indicators.append("PsLoadedModuleList access — may hide from driver enumeration")
+            indicators.append("PsLoadedModuleList access -- may hide from driver enumeration")
         if has_unloaded:
-            indicators.append("MmUnloadedDrivers access — may erase unload evidence")
+            indicators.append("MmUnloadedDrivers access -- may erase unload evidence")
         if has_piddb:
-            indicators.append("PiDDBCacheTable access — may clean driver database cache")
+            indicators.append("PiDDBCacheTable access -- may clean driver database cache")
 
         confidence = round(min(confidence, 1.0), 2)
 
-        # Only report if there's meaningful evidence
-        if confidence < 0.2:
+        # Only report if there's meaningful evidence.
+        # MmGetSystemRoutineAddress + offset_hits alone = 0.25 which is noise,
+        # so require at least 0.3 for a real DKOM detection.
+        if confidence < 0.3:
             return matches
 
         location = offset_hits[0]["rva"] if offset_hits else 0
@@ -160,7 +175,7 @@ class DkomPattern(Pattern):
             desc_parts.append("Driver hiding capability via module list manipulation.")
         if has_dynamic_resolve and not dkom_strings and not offset_hits:
             desc_parts.append(
-                "Dynamic API resolution present — potential DKOM preparation "
+                "Dynamic API resolution present -- potential DKOM preparation "
                 "(no direct evidence of structure manipulation found)."
             )
 

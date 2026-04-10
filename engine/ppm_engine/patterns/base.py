@@ -58,15 +58,11 @@ class PatternEngine:
 
     def scan_all(self, adapter, callgraph=None, depgraph=None) -> list[PatternMatch]:
         results: list[PatternMatch] = []
+        self.errors: list[dict] = []
         for p in self.patterns:
             try:
                 results.extend(p.scan(adapter, callgraph, depgraph))
             except Exception as e:
-                results.append(
-                    PatternMatch(
-                        p.name, 0.0, 0,
-                        {"error": str(e)},
-                        f"Pattern {p.name} failed: {e}",
-                    )
-                )
+                # Log errors but don't create fake matches
+                self.errors.append({"pattern": p.name, "error": str(e)})
         return sorted(results, key=lambda m: -m.confidence)

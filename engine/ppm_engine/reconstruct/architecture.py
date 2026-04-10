@@ -118,9 +118,10 @@ class ArchitectureReconstructor:
         has_apc = "KeInsertQueueApc" in all_funcs or "KeInitializeApc" in all_funcs
         has_flt = "FltRegisterFilter" in all_funcs
         has_terminate = "ZwTerminateProcess" in all_funcs or "NtTerminateProcess" in all_funcs
-        has_dkom_hints = any(
-            f in all_funcs for f in ("MmGetSystemRoutineAddress",)
-        )
+        # MmGetSystemRoutineAddress alone is NOT rootkit evidence --
+        # almost every non-trivial driver imports it for version compat.
+        # Only flag as rootkit if combined with actual DKOM string indicators.
+        has_dynamic_resolve = "MmGetSystemRoutineAddress" in all_funcs
 
         # Classification priority (most specific first)
         if has_ps_notify and has_apc:
@@ -143,8 +144,6 @@ class ArchitectureReconstructor:
             return "process_monitor"
         if has_apc:
             return "apc_injector"
-        if has_dkom_hints and not has_ob_register:
-            return "rootkit_like"
 
         return "generic_driver"
 
@@ -153,42 +152,44 @@ class ArchitectureReconstructor:
         protections: list[str] = []
         exports = self._get_exports(file_info)
         imports = self._get_imports(file_info)
+        file_format = self._get_attr(file_info, "format", "")
+        is_driver = "DRIVER" in file_format.upper()
         all_funcs = set()
         for funcs in imports.values():
             if isinstance(funcs, list):
                 all_funcs.update(funcs)
 
-        # No DriverUnload = cannot be unloaded
-        if "DriverUnload" not in exports:
-            protections.append("No DriverUnload export — driver cannot be unloaded normally")
+        # No DriverUnload = cannot be unloaded (only relevant for drivers)
+        if is_driver and "DriverUnload" not in exports:
+            protections.append("No DriverUnload export -- driver cannot be unloaded normally")
 
         # Registry protection via CmCallback
         if "CmRegisterCallbackEx" in all_funcs or "CmRegisterCallback" in all_funcs:
             protections.append(
-                "Registry callback registered — may protect its own registry keys"
+                "Registry callback registered -- may protect its own registry keys"
             )
 
         # ObRegisterCallbacks for handle protection
         if "ObRegisterCallbacks" in all_funcs:
             protections.append(
-                "Object callbacks registered — can strip handle access rights"
+                "Object callbacks registered -- can strip handle access rights"
             )
 
         # DKOM indicators
         if "MmGetSystemRoutineAddress" in all_funcs:
             protections.append(
-                "Dynamic API resolution via MmGetSystemRoutineAddress — "
+                "Dynamic API resolution via MmGetSystemRoutineAddress --"
                 "may resolve undocumented APIs for DKOM"
             )
 
         # Check for known DKOM-related strings
         strings_list = self._get_strings(file_info)
         dkom_indicators = {
-            "PsLoadedModuleList": "PsLoadedModuleList access — may hide from driver list",
-            "MmUnloadedDrivers": "MmUnloadedDrivers access — may clear unload traces",
-            "PiDDBCacheTable": "PiDDBCacheTable access — may clean driver database cache",
-            "ActiveProcessLinks": "ActiveProcessLinks reference — may perform process DKOM hiding",
-            "MiRememberUnloadedDriver": "MiRememberUnloadedDriver — may patch unload tracking",
+            "PsLoadedModuleList": "PsLoadedModuleList access -- may hide from driver list",
+            "MmUnloadedDrivers": "MmUnloadedDrivers access -- may clear unload traces",
+            "PiDDBCacheTable": "PiDDBCacheTable access -- may clean driver database cache",
+            "ActiveProcessLinks": "ActiveProcessLinks reference -- may perform process DKOM hiding",
+            "MiRememberUnloadedDriver": "MiRememberUnloadedDriver -- may patch unload tracking",
         }
         for s in strings_list:
             val = s if isinstance(s, str) else s.get("value", "")
@@ -196,8 +197,8 @@ class ArchitectureReconstructor:
                 if indicator in val and desc not in protections:
                     protections.append(desc)
 
-        # Check depgraph for writes to known offsets
-        if depgraph is not None:
+        # Check depgraph for writes to known EPROCESS offsets (kernel drivers only)
+        if is_driver and depgraph is not None:
             nodes = {}
             if hasattr(depgraph, "nodes") and isinstance(depgraph.nodes, dict):
                 nodes = depgraph.nodes
@@ -206,7 +207,6 @@ class ArchitectureReconstructor:
 
             for nid, attrs in nodes.items():
                 label = self._get_attr(attrs, "label", "") or self._get_attr(attrs, "name", "") or ""
-                # ActiveProcessLinks offset on Win10 x64 = 0x448
                 if "0x448" in str(attrs) or "0x2f0" in str(attrs):
                     msg = "Writes to EPROCESS offset (potential DKOM)"
                     if msg not in protections:
@@ -383,6 +383,8 @@ class ArchitectureReconstructor:
         parts: list[str] = []
 
         # Type description
+        is_driver = "DRIVER" in file_format.upper()
+
         type_desc = {
             "process_protection": "process protection driver that uses ObRegisterCallbacks to filter handle operations",
             "process_registry_protection": "driver that protects both processes and registry keys via kernel callbacks",
@@ -393,12 +395,12 @@ class ArchitectureReconstructor:
             "process_monitor": "process monitoring driver that tracks process creation and termination",
             "process_monitor_with_kill": "process monitoring driver with process termination capability",
             "process_protection_and_termination": "process protection driver with termination capability",
-            "rootkit_like": "driver with rootkit-like characteristics (dynamic API resolution, possible DKOM)",
-            "generic_driver": "kernel-mode driver",
+            "rootkit_like": "binary with rootkit-like characteristics (dynamic API resolution, possible DKOM)",
+            "generic_driver": "driver" if is_driver else (
+                "dynamic library" if "DLL" in file_format.upper() else "executable"),
         }
-        desc = type_desc.get(driver_type, f"{driver_type} driver")
+        desc = type_desc.get(driver_type, f"{driver_type} binary")
 
-        is_driver = "DRIVER" in file_format.upper()
         prefix = "Kernel" if is_driver else "User-mode"
         parts.append(f"{prefix} {desc}.")
 

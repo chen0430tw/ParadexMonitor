@@ -72,8 +72,27 @@ class ApcInjectPattern(Pattern):
         has_apc = bool(all_funcs & _APC_APIS)
         has_dynamic = bool(all_funcs & _DYNAMIC_RESOLVE)
 
-        # APC APIs are the core indicator
-        if not has_apc and not has_dynamic:
+        # APC APIs (KeInitializeApc/KeInsertQueueApc) are normal kernel
+        # mechanisms used for async I/O, thread pool, etc. They are NOT
+        # injection-specific. To distinguish injection from normal APC usage,
+        # require MEMORY APIs (ZwAllocateVirtualMemory/ZwWriteVirtualMemory)
+        # which indicate writing into another process's address space.
+        # ObOpenObjectByPointer and PsLookupProcessByProcessId are too common
+        # in normal drivers (used for process reference counting, I/O, etc.)
+        if not has_apc:
+            if has_dynamic:
+                strings = adapter.strings(min_len=4)
+                dynamic_apc = any(
+                    s.get("value", "") in _APC_APIS for s in strings
+                )
+                if not dynamic_apc:
+                    return matches
+            else:
+                return matches
+
+        # APC + process access alone = normal async kernel operation.
+        # APC + memory write = likely injection (allocating in target process).
+        if not has_memory and not has_notify:
             return matches
 
         # Scan IAT call sites to locate the actual APC calls
@@ -85,10 +104,11 @@ class ApcInjectPattern(Pattern):
 
         # Calculate confidence based on how many stages are present
         stage_count = sum([has_notify, has_process_access, has_memory, has_apc])
-        if has_apc:
-            base_confidence = 0.5 + (stage_count - 1) * 0.15
+        if has_apc and stage_count >= 3:
+            base_confidence = 0.5 + (stage_count - 3) * 0.2
+        elif has_apc and stage_count == 2:
+            base_confidence = 0.4
         else:
-            # Only dynamic resolution, no direct APC imports
             base_confidence = 0.3
 
         # Check for dynamic resolution of APC APIs (higher sophistication)

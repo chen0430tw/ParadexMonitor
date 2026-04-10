@@ -14,6 +14,19 @@ from ppm_engine.depgraph.nodes import Node
 from ppm_engine.depgraph.edges import Edge
 
 
+_TYPE_ALIASES: dict[str, list[str]] = {
+    "obcallback": ["ObRegisterCallbacks"],
+    "cmcallback": ["CmRegisterCallbackEx", "CmRegisterCallback"],
+    "processnotify": ["PsSetCreateProcessNotifyRoutine", "PsSetCreateProcessNotifyRoutineEx",
+                       "PsSetCreateProcessNotifyRoutineEx2"],
+    "threadnotify": ["PsSetCreateThreadNotifyRoutine"],
+    "imagenotify": ["PsSetLoadImageNotifyRoutine", "PsSetLoadImageNotifyRoutineEx"],
+    "minifilter": ["FltRegisterFilter"],
+    "notify": ["PsSetCreateProcessNotifyRoutine", "PsSetCreateThreadNotifyRoutine",
+                "PsSetLoadImageNotifyRoutine"],
+}
+
+
 class DepGraph:
     """A directed dependency graph with rich query capabilities."""
 
@@ -70,12 +83,19 @@ class DepGraph:
         """Find all 'registers' edges where dst matches *callback_type* pattern.
 
         Parameters:
-            callback_type: Substring to match against destination node labels
-                           (e.g. ``"ObRegisterCallbacks"``, ``"CmRegister"``).
+            callback_type: Substring to match against destination node labels,
+                           IDs, edge metadata, or node metadata['api'].
+                           Also supports short aliases: ``"ObCallback"`` matches
+                           ``ObRegisterCallbacks``, ``"CmCallback"`` matches
+                           ``CmRegisterCallback*``, etc.
 
         Returns:
             List of dicts: ``[{"registrar": ..., "handler": ..., "type": ...}]``
         """
+        # Expand type aliases: "ObCallback" -> ["ObRegisterCallbacks"]
+        query_lower = callback_type.lower()
+        expanded_apis = _TYPE_ALIASES.get(query_lower, [])
+
         results: list[dict] = []
         for edge in self.edges:
             if edge.edge_type != "registers":
@@ -84,16 +104,31 @@ class DepGraph:
             src_node = self.nodes.get(edge.src)
             if dst_node is None or src_node is None:
                 continue
-            # Match callback_type as substring in either the edge metadata,
-            # destination label, or destination id
-            target_str = f"{dst_node.label} {dst_node.id} {edge.metadata.get('callback_api', '')}"
-            if callback_type.lower() in target_str.lower():
+
+            cb_api = edge.metadata.get("callback_api", "")
+            node_api = dst_node.metadata.get("api", "")
+
+            # Check alias match first (exact API name match)
+            if expanded_apis:
+                if cb_api in expanded_apis or node_api in expanded_apis:
+                    results.append({
+                        "registrar": src_node.label,
+                        "registrar_id": src_node.id,
+                        "handler": dst_node.label,
+                        "handler_id": dst_node.id,
+                        "type": cb_api or node_api or "unknown",
+                    })
+                    continue
+
+            # Substring match against label, id, edge metadata, and node metadata
+            target_str = f"{dst_node.label} {dst_node.id} {cb_api} {node_api}"
+            if query_lower in target_str.lower():
                 results.append({
                     "registrar": src_node.label,
                     "registrar_id": src_node.id,
                     "handler": dst_node.label,
                     "handler_id": dst_node.id,
-                    "type": edge.metadata.get("callback_api", "unknown"),
+                    "type": cb_api or node_api or "unknown",
                 })
         return results
 

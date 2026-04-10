@@ -75,9 +75,9 @@ DANGEROUS_SINK_APIS = {
     "ZwAllocateVirtualMemory",
     "ZwWriteVirtualMemory",
     "MmCopyVirtualMemory",
-    "ZwSetInformationProcess",
-    "ZwSetInformationThread",
-    "MmGetSystemRoutineAddress",
+    # NOTE: ZwSetInformationProcess, ZwSetInformationThread, and
+    # MmGetSystemRoutineAddress are excluded -- too common in normal drivers
+    # (thread priority, OS version compat, etc.)
 }
 
 ENTRY_POINT_NAMES = {
@@ -105,13 +105,17 @@ class ChainTracer:
 
     def __init__(self, depgraph):
         self.graph = depgraph
+        self._cached_nodes: dict | None = None
+        self._cached_edges: dict | None = None
 
     # ----------------------------------------------------------
     # helpers
     # ----------------------------------------------------------
 
     def _get_nodes(self) -> dict:
-        """Return node dict: id -> {label, node_type, address, ...}."""
+        """Return node dict: id -> {label, node_type, address, ...}. Cached."""
+        if self._cached_nodes is not None:
+            return self._cached_nodes
         if self.graph is None:
             return {}
         raw = None
@@ -136,10 +140,13 @@ class ChainTracer:
                              "address": getattr(v, "address", 0)}
             else:
                 result[k] = {"label": str(v)}
+        self._cached_nodes = result
         return result
 
     def _get_edges(self) -> dict:
-        """Return edge adjacency: source_id -> [{target, action, detail}, ...]."""
+        """Return edge adjacency: source_id -> [{target, action, detail}, ...]. Cached."""
+        if self._cached_edges is not None:
+            return self._cached_edges
         if self.graph is None:
             return {}
         raw = None
@@ -151,6 +158,7 @@ class ChainTracer:
             return {}
         # If already adjacency dict, return as-is
         if isinstance(raw, dict):
+            self._cached_edges = raw
             return raw
         # If list of Edge dataclasses or dicts, build adjacency
         adj: dict[str, list[dict]] = {}
@@ -166,6 +174,7 @@ class ChainTracer:
             else:
                 continue
             adj.setdefault(src, []).append(entry)
+        self._cached_edges = adj
         return adj
 
     def _successors(self, node_id: str) -> list[dict]:
@@ -212,24 +221,34 @@ class ChainTracer:
         return entries
 
     def _classify_verdict(self, chain: Chain) -> str:
-        """Assign a verdict based on the APIs encountered in the chain."""
-        apis_seen = set()
-        for step in chain.steps:
-            apis_seen.add(step.node_id)
+        """Assign a verdict based on the APIs encountered in the chain.
 
-        if apis_seen & {"ZwTerminateProcess", "NtTerminateProcess"}:
+        Uses node labels (not raw node_ids) to match against known API names,
+        since node_ids have prefixes like ``import_`` or ``func_``.
+        """
+        nodes = self._get_nodes()
+        labels_seen: set[str] = set()
+        for step in chain.steps:
+            # Collect both the raw node_id AND the resolved label
+            labels_seen.add(step.node_id)
+            attrs = nodes.get(step.node_id, {})
+            label = attrs.get("label", attrs.get("name", ""))
+            if label:
+                labels_seen.add(label)
+
+        if labels_seen & {"ZwTerminateProcess", "NtTerminateProcess"}:
             return "Process termination capability"
-        if apis_seen & {"KeInsertQueueApc", "KeInitializeApc"}:
+        if labels_seen & {"KeInsertQueueApc", "KeInitializeApc"}:
             return "APC injection capability"
-        if apis_seen & {"ObOpenObjectByPointer"}:
+        if labels_seen & {"ObOpenObjectByPointer"}:
             return "Object handle manipulation"
-        if apis_seen & {"ZwAllocateVirtualMemory", "ZwWriteVirtualMemory", "MmCopyVirtualMemory"}:
+        if labels_seen & {"ZwAllocateVirtualMemory", "ZwWriteVirtualMemory", "MmCopyVirtualMemory"}:
             return "Remote memory manipulation"
-        if apis_seen & CALLBACK_REGISTRATION_APIS:
-            if apis_seen & {"ObRegisterCallbacks"}:
-                return "Object callback registration — handle access filtering"
-            if apis_seen & {"CmRegisterCallbackEx", "CmRegisterCallback"}:
-                return "Registry callback registration — registry monitoring/protection"
+        if labels_seen & CALLBACK_REGISTRATION_APIS:
+            if labels_seen & {"ObRegisterCallbacks"}:
+                return "Object callback registration -- handle access filtering"
+            if labels_seen & {"CmRegisterCallbackEx", "CmRegisterCallback"}:
+                return "Registry callback registration -- registry monitoring/protection"
             return "Kernel callback registration"
         return "Interesting API chain"
 
@@ -411,9 +430,13 @@ class ChainTracer:
             results.extend(self.trace_callback_chain(reg_api))
 
         # Deduplicate chains with identical step sequences
+        # and filter out trivially short chains (< 3 steps = just "entry -> API"
+        # which only says "this binary imports this API" -- not interesting)
         seen_keys: set[str] = set()
         unique: list[Chain] = []
         for chain in results:
+            if len(chain.steps) < 3:
+                continue
             key = "|".join(f"{s.node_id}:{s.action}" for s in chain.steps)
             if key not in seen_keys:
                 seen_keys.add(key)

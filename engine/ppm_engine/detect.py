@@ -29,6 +29,12 @@ def detect(path: str) -> FileInfo:
     if len(magic) < 4:
         return FileInfo(path=path, format="TOO_SMALL")
 
+    # LNK (Windows shortcut): magic 4C 00 00 00 + CLSID
+    if magic[:4] == b"\x4c\x00\x00\x00" and len(magic) >= 16:
+        # Verify CLSID: 00021401-0000-0000-C000-000000000046
+        if magic[4:8] == b"\x01\x14\x02\x00":
+            return FileInfo(path=path, format="LNK", arch="n/a")
+
     # PE (MZ header)
     if magic[:2] == b"MZ":
         return _detect_pe(path)
@@ -39,16 +45,65 @@ def detect(path: str) -> FileInfo:
         fmt = "ELF64" if cls == 2 else "ELF32"
         return FileInfo(path=path, format=fmt, arch="x64" if cls == 2 else "x86")
 
-    # Mach-O
-    if magic[:4] in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
-                      b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
-        return FileInfo(path=path, format="MACHO")
+    # Mach-O 32-bit
+    if magic[:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe"):
+        return FileInfo(path=path, format="MACHO", arch="x86")
+    # Mach-O 64-bit -- check CPU type for x64 vs arm64
+    if magic[:4] in (b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"):
+        import struct
+        # CPU type is at offset 4 (little-endian if LE magic, big-endian if BE)
+        is_le = magic[:4] == b"\xcf\xfa\xed\xfe"
+        cpu = struct.unpack("<I" if is_le else ">I", magic[4:8])[0] if len(magic) >= 8 else 0
+        arch = "arm64" if cpu == 0x0100000C else "x64"
+        return FileInfo(path=path, format="MACHO", arch=arch)
 
-    # Mach-O fat binary
+    # Mach-O fat binary (universal)
     if magic[:4] in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
-        return FileInfo(path=path, format="MACHO_FAT")
+        return FileInfo(path=path, format="MACHO_FAT", arch="universal")
 
-    # Fallback: raw shellcode
+    # Common media / document formats (not analyzable binaries)
+    _MEDIA_MAGIC = {
+        # Images
+        b"\xff\xd8\xff": "JPEG",
+        b"\x89PNG": "PNG",
+        b"GIF8": "GIF",
+        b"BM": "BMP",
+        b"RIFF": "RIFF",          # WAV, AVI, WebP
+        b"II\x2a\x00": "TIFF",    # little-endian TIFF
+        b"MM\x00\x2a": "TIFF",    # big-endian TIFF
+        # Audio/Video
+        b"\x1aE\xdf\xa3": "MKV",  # Matroska/WebM
+        b"fLaC": "FLAC",
+        b"OggS": "OGG",
+        b"\xff\xfb": "MP3",
+        b"\xff\xf3": "MP3",
+        b"\xff\xf2": "MP3",
+        b"ID3": "MP3",
+        # Documents
+        b"%PDF": "PDF",
+        b"PK\x03\x04": "ZIP",     # ZIP/DOCX/XLSX/JAR/APK
+    }
+    for sig, fmt in _MEDIA_MAGIC.items():
+        if magic[:len(sig)] == sig:
+            return FileInfo(path=path, format=fmt, arch="n/a")
+
+    # Mach-O / ftyp (MP4/MOV): "ftyp" at offset 4
+    if len(magic) >= 8 and magic[4:8] == b"ftyp":
+        return FileInfo(path=path, format="MP4", arch="n/a")
+
+    # Check if the file is mostly printable text (not a binary)
+    try:
+        with open(p, "rb") as f:
+            sample = f.read(4096)
+        if sample:
+            printable = sum(1 for b in sample if 0x20 <= b <= 0x7E or b in (0x09, 0x0A, 0x0D))
+            ratio = printable / len(sample)
+            if ratio > 0.85:
+                return FileInfo(path=path, format="TEXT")
+    except Exception:
+        pass
+
+    # Fallback: raw shellcode (unknown binary format)
     return FileInfo(path=path, format="SHELLCODE")
 
 

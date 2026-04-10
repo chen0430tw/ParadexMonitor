@@ -43,6 +43,16 @@ except ImportError:
     ELFAdapter = None  # type: ignore[assignment]
 
 try:
+    from .adapters.lnk import LNKAdapter
+except ImportError:
+    LNKAdapter = None  # type: ignore[assignment]
+
+try:
+    from .adapters.macho import MachOAdapter
+except ImportError:
+    MachOAdapter = None  # type: ignore[assignment]
+
+try:
     from .unpack.detect import detect_packer
 except ImportError:
     detect_packer = None  # type: ignore[assignment]
@@ -91,6 +101,35 @@ def _get_bridge_manager() -> BridgeManager | None:
     return _bridge_mgr
 
 
+# --- Path sanitization ---
+
+def _sanitize_path(path: str) -> str:
+    """Strip dangerous characters from user-supplied paths.
+
+    Prevents injection payloads from leaking into JSON output and
+    blocks protocol-based paths (http://, file://, \\\\UNC).
+    """
+    # Block protocol-based paths
+    lower = path.lower().strip()
+    for proto in ("http://", "https://", "ftp://", "file://", "ldap://", "jndi:"):
+        if proto in lower:
+            raise ValueError(f"protocol in path not allowed: {proto}")
+    # Block UNC paths
+    if path.startswith("\\\\") or path.startswith("//"):
+        raise ValueError("UNC paths not allowed")
+    # Block Windows reserved device names (CON, NUL, PRN, AUX, COM1-9, LPT1-9)
+    # These can cause hangs or unexpected behavior when opened
+    import re
+    basename = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].split(".")[0].upper()
+    if re.fullmatch(r"CON|NUL|PRN|AUX|COM\d|LPT\d", basename):
+        raise ValueError(f"Windows reserved device name not allowed: {basename}")
+    # Strip control characters and Unicode direction overrides
+    cleaned = "".join(c for c in path if ord(c) >= 0x20 and ord(c) not in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069))
+    # Strip null bytes
+    cleaned = cleaned.replace("\x00", "")
+    return cleaned
+
+
 # --- Request handlers ---
 
 
@@ -109,6 +148,10 @@ def _handle_detect(req: dict) -> dict:
     path = req.get("path", "")
     if not path:
         return {"error": "missing 'path'"}
+    try:
+        path = _sanitize_path(path)
+    except ValueError as e:
+        return {"error": str(e)}
     if detect is None:
         return {"error": "detect module not available"}
     info = detect(path)
@@ -120,6 +163,10 @@ def _handle_analyze(req: dict) -> dict:
     path = req.get("path", "")
     if not path:
         return {"error": "missing 'path'"}
+    try:
+        path = _sanitize_path(path)
+    except ValueError as e:
+        return {"error": str(e)}
 
     result: dict = {"status": "ok", "command": "analyze", "path": path, "stages": {}}
 
@@ -144,7 +191,29 @@ def _handle_analyze(req: dict) -> dict:
     # Stage 3: build adapter
     adapter = None
     fmt = info.format
-    if fmt.startswith("PE") and PEAdapter is not None:
+    if fmt == "LNK" and LNKAdapter is not None:
+        # LNK files are shortcuts, not binaries -- run LNK-specific analysis
+        try:
+            lnk = LNKAdapter(path)
+            lnk_result = lnk.summary()
+            lnk_result["risk"] = lnk.analyze_risk()
+            lnk_result["strings"] = lnk.strings()
+            result["stages"]["adapter"] = {"type": "LNK", **lnk_result}
+            # LNK files skip binary analysis stages
+            for stage in ("callgraph", "depgraph", "patterns", "chains", "architecture"):
+                result["stages"][stage] = {"skipped": True, "reason": "LNK shortcut file"}
+            result["summary"] = {
+                "format": "LNK", "arch": "n/a", "packed": False,
+                "target": lnk_result["target"],
+                "arguments": lnk_result["arguments"][:100],
+                "risk": lnk_result["risk"]["classification"],
+                "stages_completed": 2, "stages_total": 8,
+            }
+            return result
+        except Exception as e:
+            result["stages"]["adapter"] = {"type": "LNK", "error": str(e)}
+            return result
+    elif fmt.startswith("PE") and PEAdapter is not None:
         try:
             adapter = PEAdapter(path)
             result["stages"]["adapter"] = {
@@ -159,9 +228,25 @@ def _handle_analyze(req: dict) -> dict:
     elif fmt.startswith("ELF") and ELFAdapter is not None:
         try:
             adapter = ELFAdapter(path)
-            result["stages"]["adapter"] = {"type": "ELF", "loaded": True}
+            result["stages"]["adapter"] = {
+                "type": "ELF",
+                "imports": {k: len(v) for k, v in adapter.imports().items()},
+                "strings": len(adapter.strings()),
+                "is_kernel_module": adapter.is_kernel_module(),
+            }
         except Exception as e:
             result["stages"]["adapter"] = {"type": "ELF", "error": str(e)}
+    elif fmt.startswith("MACHO") and MachOAdapter is not None:
+        try:
+            adapter = MachOAdapter(path)
+            result["stages"]["adapter"] = {
+                "type": "MachO",
+                "imports": {k: len(v) for k, v in adapter.imports().items()},
+                "strings": len(adapter.strings()),
+                "is_kext": adapter.is_kernel_extension(),
+            }
+        except Exception as e:
+            result["stages"]["adapter"] = {"type": "MachO", "error": str(e)}
     else:
         result["stages"]["adapter"] = {"skipped": True, "reason": f"no adapter for {fmt}"}
 
@@ -208,6 +293,31 @@ def _handle_analyze(req: dict) -> dict:
                     for m in matches
                 ]
             }
+            # Inject pattern results back into depgraph nodes
+            if graph is not None:
+                for m in matches:
+                    best_node = None
+                    best_dist = float("inf")
+                    for nid, node in graph.nodes.items():
+                        if node.node_type not in ("function", "callback"):
+                            continue
+                        # Exact address match
+                        if node.address == m.location:
+                            best_node = node
+                            break
+                        # Pattern location falls within function range (call site inside function)
+                        fn_size = node.metadata.get("size", 0)
+                        if fn_size and node.address <= m.location < node.address + fn_size:
+                            dist = m.location - node.address
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_node = node
+                    if best_node is not None:
+                        best_node.metadata.setdefault("patterns", []).append({
+                            "name": m.pattern_name,
+                            "confidence": m.confidence,
+                            "description": m.description,
+                        })
         except Exception as e:
             result["stages"]["patterns"] = {"error": str(e)}
     else:
@@ -263,6 +373,10 @@ def _handle_depgraph(req: dict) -> dict:
     query = req.get("query", "")
     if not path:
         return {"error": "missing 'path'"}
+    try:
+        path = _sanitize_path(path)
+    except ValueError as e:
+        return {"error": str(e)}
     if detect is None:
         return {"error": "detect module not available"}
     if CallGraph is None or DepGraphBuilder is None:

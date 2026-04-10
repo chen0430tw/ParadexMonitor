@@ -123,7 +123,7 @@ class HandleStripPattern(Pattern):
                 confidence = 0.85
                 desc = (
                     f"Handle access stripping at RVA 0x{hit['rva']:X}. "
-                    f"AND with {mask_name} (0x{mask_val:X}) — keeps only safe access rights."
+                    f"AND with {mask_name} (0x{mask_val:X}) -- keeps only safe access rights."
                 )
             elif is_not_strip:
                 mask_name = _ACCESS_MASKS.get(mask_val, f"0x{mask_val:X}")
