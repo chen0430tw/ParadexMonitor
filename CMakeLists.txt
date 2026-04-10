@@ -16,7 +16,12 @@ set(PLUGIN_SOURCES
     ppm/plugins/recon/plugin.cpp
     ppm/plugins/callbacks/plugin.cpp
     ppm/plugins/inspect/plugin.cpp
-    # Add new plugins here — one line per plugin
+    ppm/plugins/handles/plugin.cpp
+    ppm/plugins/drivers/plugin.cpp
+    ppm/plugins/memory/plugin.cpp
+    ppm/plugins/elevation/plugin.cpp
+    ppm/plugins/winlogon/plugin.cpp
+    ppm/plugins/loader/plugin.cpp
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────
