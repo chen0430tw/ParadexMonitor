@@ -16,6 +16,7 @@ full = [
 ]
 
 [project.scripts]
+ppm = "ppm_engine.cli:main"
 ppm-engine = "ppm_engine.__main__:main"
 
 [build-system]
