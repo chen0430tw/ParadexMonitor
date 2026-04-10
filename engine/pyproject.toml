@@ -1,19 +1,44 @@
 [project]
 name = "ppm-engine"
 version = "0.2.0"
-description = "Paradex Process Monitor - Python analysis engine"
+description = "Binary analysis engine -- reconstruct architecture from compiled binaries in seconds"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [
+    {name = "chen0430tw"},
+]
+keywords = ["binary-analysis", "reverse-engineering", "malware", "kernel-driver", "pe", "elf", "mach-o"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
 dependencies = [
     "capstone>=5.0",
     "pefile>=2023.2",
-    "lief>=0.14",
-    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
 full = [
-    "unicorn>=2.0",      # emulation-based unpacking
+    "lief>=0.14",
+    "numpy>=1.24",
+    "unicorn>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/chen0430tw/ParadexMonitor"
+Repository = "https://github.com/chen0430tw/ParadexMonitor"
+Issues = "https://github.com/chen0430tw/ParadexMonitor/issues"
 
 [project.scripts]
 ppm = "ppm_engine.cli:main"
@@ -22,3 +47,7 @@ ppm-engine = "ppm_engine.__main__:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ppm_engine*"]
