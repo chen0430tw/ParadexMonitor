@@ -51,9 +51,10 @@ class PatternEngine:
         from .apc_inject import ApcInjectPattern
         from .dkom import DkomPattern
         from .handle_strip import HandleStripPattern
+        from .xor_payload import XorPayloadPattern
 
         for cls in (ObCallbackPattern, CmCallbackPattern, ApcInjectPattern,
-                    DkomPattern, HandleStripPattern):
+                    DkomPattern, HandleStripPattern, XorPayloadPattern):
             self.register(cls())
 
     def scan_all(self, adapter, callgraph=None, depgraph=None) -> list[PatternMatch]:

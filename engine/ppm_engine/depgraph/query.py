@@ -77,6 +77,48 @@ class DepGraph:
         return self._incoming  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
+    # Node resolution
+    # ------------------------------------------------------------------
+    def _resolve_node_id(self, query: str) -> Optional[str]:
+        """Fuzzy-resolve a user query to a node ID.
+
+        Accepts: "sub_1120", "0x1120", "1120", "func_0x1120",
+                 "MmMapIoSpace", "import_MmMapIoSpace", etc.
+        """
+        if query in self.nodes:
+            return query
+        q = query.strip().lower()
+
+        # Try "func_0x" + hex prefix
+        if q.startswith("sub_"):
+            candidate = f"func_0x{q[4:]}"
+            if candidate in self.nodes:
+                return candidate
+        # Try bare hex: "1120" -> "func_0x1120"
+        try:
+            int(q, 16)
+            candidate = f"func_0x{q}"
+            if candidate in self.nodes:
+                return candidate
+        except ValueError:
+            pass
+        # Try "0x1120" -> "func_0x1120"
+        if q.startswith("0x"):
+            candidate = f"func_{q}"
+            if candidate in self.nodes:
+                return candidate
+        # Try import prefix
+        candidate = f"import_{query}"
+        if candidate in self.nodes:
+            return candidate
+        # Substring match on label
+        for nid, node in self.nodes.items():
+            label = getattr(node, "label", "")
+            if q == label.lower() or query == label:
+                return nid
+        return None
+
+    # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
     def who_registers(self, callback_type: str) -> list[dict]:
@@ -156,8 +198,10 @@ class DepGraph:
                 ]
             }
         """
-        if node_id not in self.nodes:
+        resolved = self._resolve_node_id(node_id)
+        if not resolved:
             return {}
+        node_id = resolved
 
         def _build(nid: str, d: int, visited: set[str]) -> dict:
             node = self.nodes[nid]
@@ -239,14 +283,52 @@ class DepGraph:
 
         return all_paths
 
+    def who_calls(self, node_id: str, depth: int = 10) -> list[list[str]]:
+        """Find all callers of a node (reverse BFS).
+
+        Returns a list of call chains leading TO this node, each chain
+        ordered from root caller to the target node.
+        """
+        # Fuzzy match: allow "sub_1120", "0x1120", "1120", "func_0x1120"
+        if node_id not in self.nodes:
+            resolved = self._resolve_node_id(node_id)
+            if resolved:
+                node_id = resolved
+            else:
+                return []
+
+        chains: list[list[str]] = []
+        # BFS backwards through incoming edges
+        queue: deque[list[str]] = deque([[node_id]])
+        visited: set[str] = {node_id}
+        while queue:
+            path = queue.popleft()
+            cur = path[0]  # head of chain (we're prepending)
+            has_caller = False
+            for edge in self.incoming.get(cur, []):
+                if edge.src not in visited and len(path) < depth:
+                    has_caller = True
+                    visited.add(edge.src)
+                    new_path = [edge.src] + path
+                    queue.append(new_path)
+                    # If this caller has no incoming edges, it's a root
+                    if not self.incoming.get(edge.src):
+                        chains.append(new_path)
+            if not has_caller and len(path) > 1:
+                chains.append(path)
+
+        return chains
+
     def impact_of(self, node_id: str) -> dict:
         """If this node is removed/patched, what is affected?
 
         Returns all nodes reachable FROM this node via outgoing edges,
         grouped by node type.
         """
-        if node_id not in self.nodes:
+        resolved = self._resolve_node_id(node_id)
+        if not resolved:
             return {"affected": [], "by_type": {}}
+        node_id = resolved
 
         visited: set[str] = set()
         queue = deque([node_id])

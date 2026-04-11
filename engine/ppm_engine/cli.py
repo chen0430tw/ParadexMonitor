@@ -325,6 +325,14 @@ def _cmd_depgraph(args):
         else:
             _print_tree(tree)
 
+    elif cmd == "who_calls":
+        chains = graph.who_calls(arg)
+        if not chains:
+            print(f"No callers found for '{arg}'")
+        for chain in chains:
+            labels = [graph.nodes[n].label if n in graph.nodes else n for n in chain]
+            print(f"  {' -> '.join(labels)}")
+
     elif cmd == "impact_of":
         impact = graph.impact_of(arg)
         if not impact.get("affected"):
@@ -336,7 +344,7 @@ def _cmd_depgraph(args):
 
     else:
         print(f"Unknown query: {cmd}")
-        print(f"Available: who_registers, find_sinks, trace_from, impact_of")
+        print(f"Available: who_registers, find_sinks, trace_from, impact_of, who_calls")
 
 
 def _cmd_dataflow(args):
@@ -425,17 +433,29 @@ def _cmd_pseudo(args):
         return
 
     fn = cg.functions.get(rva)
-    fn_size = min(fn.size if fn and fn.size else 0x400, 0x1000)
+    fn_size = min(fn.size if fn and fn.size else 0x400, 0x2000)
 
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     insns = list(md.disasm(text_data[offset:offset + fn_size], rva))
 
-    # Trim at ret
+    # Trim at function boundary: stop at the LAST ret before the next
+    # function starts, not the first ret (IOCTL dispatch has multiple rets).
+    # Find the set of known function start addresses from the callgraph.
+    func_starts = set(cg.functions.keys()) - {rva}
     trimmed = []
     for insn in insns:
+        if insn.address != rva and insn.address in func_starts:
+            break  # hit next function
         trimmed.append(insn)
-        if insn.mnemonic in ("ret", "retn"):
-            break
+
+    # If we didn't hit another function, trim after the last ret
+    if trimmed and trimmed[-1].mnemonic not in ("ret", "retn"):
+        last_ret_idx = -1
+        for i, insn in enumerate(trimmed):
+            if insn.mnemonic in ("ret", "retn"):
+                last_ret_idx = i
+        if last_ret_idx >= 0:
+            trimmed = trimmed[:last_ret_idx + 1]
 
     gen = PseudoCodeGenerator()
     pseudo = gen.generate(rva, trimmed, import_map, string_map)
