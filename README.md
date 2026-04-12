@@ -21,7 +21,11 @@ PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) o
 | **ISO** (ISO 9660/UDF) | `iso` adapter | pycdlib directory tree, suspicious executable flagging |
 | **PyInstaller** | `pyinst` adapter | MEI/TOC parsing, entry scripts + module + binary extraction |
 | **MSIX/AppX** | `msix` adapter | ZIP + AppxManifest.xml capabilities/permissions |
+| **Squirrel** (Electron) | `squirrel` adapter | EOCD tail scan, nupkg extraction, .nuspec metadata (Discord, Slack, Claude Desktop) |
+| **Node.js/Bun SEA** | `node_sea` adapter | PE section table scan for .bun/NODE_SEA_BLOB (Claude Code = Bun SEA) |
 | **Media/docs** | detect only | JPEG, PNG, WAV, PDF, ZIP, MP4, TEXT, and 12 more |
+
+All 15 format detections complete in < 0.35s regardless of file size (243MB Claude Code: 0.30s).
 
 Non-binary formats (images, audio, text) are correctly identified and rejected -- no crashes on unexpected input.
 
