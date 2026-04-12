@@ -213,7 +213,112 @@ def _handle_analyze(req: dict) -> dict:
         except Exception as e:
             result["stages"]["adapter"] = {"type": "LNK", "error": str(e)}
             return result
-    elif fmt.startswith("PE") and PEAdapter is not None:
+    elif fmt.startswith("NSIS"):
+        # NSIS installer/uninstaller — run NSIS-specific analysis
+        try:
+            from .adapters.nsis import parse as nsis_parse
+            nsis_info = nsis_parse(path)
+            if nsis_info and nsis_info.strings:
+                # Pattern detection on NSIS strings
+                nsis_patterns = []
+                nsis_chains = []
+                chain_counts = {}
+
+                for i, s in enumerate(nsis_info.strings):
+                    sl = s.lower()
+                    # Service control patterns
+                    if "controlservice" in sl or "openservice" in sl:
+                        nsis_patterns.append({"pattern": "service_control", "confidence": 0.9,
+                                              "location": f"string_{i}"})
+                    if "deleteservice" in sl:
+                        nsis_patterns.append({"pattern": "service_delete", "confidence": 0.9,
+                                              "location": f"string_{i}"})
+                    # Process termination
+                    if "terminproc" in sl or "terminateprocess" in sl:
+                        nsis_patterns.append({"pattern": "process_kill", "confidence": 0.85,
+                                              "location": f"string_{i}"})
+                    # PnP device removal
+                    if "devcon" in sl and "remove" in sl:
+                        nsis_patterns.append({"pattern": "pnp_remove", "confidence": 0.95,
+                                              "location": f"string_{i}"})
+                    # Registry operations
+                    if "currentcontrolset\\services\\" in sl:
+                        nsis_patterns.append({"pattern": "service_registry", "confidence": 0.8,
+                                              "location": f"string_{i}"})
+                    # Driver file operations
+                    if sl.endswith(".sys"):
+                        nsis_patterns.append({"pattern": "driver_file_op", "confidence": 0.7,
+                                              "location": f"string_{i}"})
+                    # DLL injection artifacts
+                    if sl.endswith(".dll") and ("kshut" in sl or "inject" in sl):
+                        nsis_patterns.append({"pattern": "dll_injection_artifact", "confidence": 0.8,
+                                              "location": f"string_{i}"})
+
+                # Build chains from patterns
+                has_svc = any(p["pattern"] == "service_control" for p in nsis_patterns)
+                has_del = any(p["pattern"] == "service_delete" for p in nsis_patterns)
+                has_kill = any(p["pattern"] == "process_kill" for p in nsis_patterns)
+                has_pnp = any(p["pattern"] == "pnp_remove" for p in nsis_patterns)
+                has_drv = any(p["pattern"] == "driver_file_op" for p in nsis_patterns)
+                has_reg = any(p["pattern"] == "service_registry" for p in nsis_patterns)
+
+                if has_kill:
+                    nsis_chains.append({"verdict": "Process termination before uninstall",
+                                        "steps": ["TerminProc/TerminateProcess"]})
+                if has_svc and has_del:
+                    nsis_chains.append({"verdict": "Service stop + delete sequence",
+                                        "steps": ["ControlService(STOP)", "DeleteService"]})
+                if has_pnp:
+                    nsis_chains.append({"verdict": "PnP device removal (devcon remove)",
+                                        "steps": ["devcon remove <hwid>"]})
+                if has_reg:
+                    nsis_chains.append({"verdict": "Service registry cleanup",
+                                        "steps": ["DeleteRegKey HKLM\\...\\Services\\<name>"]})
+                if has_drv:
+                    nsis_chains.append({"verdict": "Driver file deletion",
+                                        "steps": [".sys file delete/reboot-delete"]})
+                if has_kill and has_svc and has_pnp and has_drv:
+                    nsis_chains.append({"verdict": "Complete driver stack uninstall sequence",
+                                        "steps": ["kill processes", "sc stop", "devcon remove",
+                                                  "sc delete", "delete .sys files", "reboot"]})
+
+                # Determine type
+                nsis_type = "nsis_uninstaller" if nsis_info.is_uninstaller else "nsis_installer"
+                if has_pnp and has_svc:
+                    nsis_type += "_driver_stack"
+
+                result["stages"]["adapter"] = {
+                    "type": "NSIS",
+                    "version": f"NSIS{nsis_info.version}" + (" Unicode" if nsis_info.unicode else ""),
+                    "compression": nsis_info.compression,
+                    "is_uninstaller": nsis_info.is_uninstaller,
+                    "strings": nsis_info.num_strings,
+                    "entries": nsis_info.num_entries,
+                    "sections": len(nsis_info.sections),
+                }
+                result["stages"]["patterns"] = {"matches": nsis_patterns}
+                result["stages"]["chains"] = {"chains": nsis_chains, "count": len(nsis_chains)}
+                result["stages"]["architecture"] = {"type": nsis_type}
+
+                # Skip binary-only stages
+                for stage in ("callgraph", "depgraph"):
+                    result["stages"][stage] = {"skipped": True, "reason": "NSIS script (not binary code)"}
+
+                result["summary"] = {
+                    "format": fmt, "arch": info.arch, "packed": info.packed,
+                    "nsis_version": nsis_info.version,
+                    "compression": nsis_info.compression,
+                    "strings": nsis_info.num_strings,
+                    "entries": nsis_info.num_entries,
+                    "stages_completed": 8, "stages_total": 8,
+                }
+                return result
+        except Exception as e:
+            result["stages"]["adapter"] = {"type": "NSIS", "error": str(e)}
+        # Fall through to PE analysis if NSIS parsing fails
+        fmt = info.format.replace("NSIS_UNINST", "PE32").replace("NSIS_INST", "PE32")
+
+    if fmt.startswith("PE") and PEAdapter is not None:
         try:
             adapter = PEAdapter(path)
             result["stages"]["adapter"] = {

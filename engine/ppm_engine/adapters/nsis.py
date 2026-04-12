@@ -334,33 +334,24 @@ def parse(path: str) -> Optional[NSISInfo]:
     # NSIS3 Unicode: strings are UTF-16LE
     # NSIS2: strings are ASCII with high-byte escapes
 
-    # Parse block headers (8 blocks, each 8 bytes: offset + num_items)
-    # Block headers start after common_header (varies by version)
-    # Typical offset for NSIS3: after 68 bytes of common data
-    # We'll try multiple offsets
+    # Block headers: 8 blocks × 8 bytes (offset + num_items).
+    # Located at offset 4 in header data (after common_flags DWORD).
+    # This is the NSIS internal layout: Header.flags(4) + Header.blocks(64) + ...
     blocks = []
-    block_header_offset = -1
+    _BLOCK_HEADER_OFFSET = 4
 
-    for try_offset in [68, 60, 72, 56, 80, 64]:
-        candidate_blocks = []
-        valid = True
-        for i in range(_BLOCKS_COUNT):
-            bh_pos = try_offset + i * _BH_STRUCT.size
-            if bh_pos + _BH_STRUCT.size > len(inflated):
-                valid = False
-                break
-            offset, num = _BH_STRUCT.unpack_from(inflated, bh_pos)
-            if offset > len(inflated) or num > 1000000:
-                valid = False
-                break
-            candidate_blocks.append((offset, num))
-        if valid and len(candidate_blocks) == _BLOCKS_COUNT:
-            # Validate: strings block offset should point to readable data
-            str_off, str_num = candidate_blocks[NB_STRINGS]
-            if str_off > 0 and str_off < len(inflated):
-                blocks = candidate_blocks
-                block_header_offset = try_offset
-                break
+    for i in range(_BLOCKS_COUNT):
+        bh_pos = _BLOCK_HEADER_OFFSET + i * _BH_STRUCT.size
+        if bh_pos + _BH_STRUCT.size > len(inflated):
+            break
+        offset, num = _BH_STRUCT.unpack_from(inflated, bh_pos)
+        blocks.append((offset, num))
+
+    # Validate blocks: strings block should point to readable data
+    if len(blocks) == _BLOCKS_COUNT:
+        str_off, _ = blocks[NB_STRINGS]
+        if str_off == 0 or str_off >= len(inflated):
+            blocks = []  # Invalid, fall back to regex
 
     if not blocks:
         # Fallback: just extract all strings from inflated data

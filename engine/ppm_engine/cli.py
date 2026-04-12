@@ -524,6 +524,8 @@ def _make_adapter(path: str):
 
 def _cmd_nsis(args):
     """Parse NSIS installer and display strings/script."""
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     from ppm_engine.adapters.nsis import parse
     path = args.file
     info = parse(path)
