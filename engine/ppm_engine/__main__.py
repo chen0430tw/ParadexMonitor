@@ -318,6 +318,71 @@ def _handle_analyze(req: dict) -> dict:
         # Fall through to PE analysis if NSIS parsing fails
         fmt = info.format.replace("NSIS_UNINST", "PE32").replace("NSIS_INST", "PE32")
 
+    elif fmt in ("INNO_SETUP", "PYINSTALLER", "SFX_7Z", "MSI", "ISO", "MSIX"):
+        # Generic installer analysis — parse with format-specific adapter,
+        # then run string-based pattern detection
+        adapter_map = {
+            "INNO_SETUP": ("ppm_engine.adapters.inno", "parse", "Inno Setup"),
+            "PYINSTALLER": ("ppm_engine.adapters.pyinst", "parse", "PyInstaller"),
+            "SFX_7Z": ("ppm_engine.adapters.sfx7z", "parse", "7z SFX"),
+            "MSI": ("ppm_engine.adapters.msi", "parse", "MSI"),
+            "ISO": ("ppm_engine.adapters.iso", "parse", "ISO"),
+            "MSIX": ("ppm_engine.adapters.msix", "parse", "MSIX"),
+        }
+        mod_path, func_name, type_label = adapter_map[fmt]
+        try:
+            import importlib
+            mod = importlib.import_module(mod_path)
+            parse_fn = getattr(mod, func_name)
+            parsed = parse_fn(path)
+            if parsed and parsed.strings:
+                # String-based pattern detection (reuse NSIS pattern logic)
+                patterns = []
+                for i, s in enumerate(parsed.strings):
+                    sl = s.lower()
+                    if "controlservice" in sl or "openservice" in sl:
+                        patterns.append({"pattern": "service_control", "confidence": 0.9, "location": f"string_{i}"})
+                    if "deleteservice" in sl:
+                        patterns.append({"pattern": "service_delete", "confidence": 0.9, "location": f"string_{i}"})
+                    if "terminateprocess" in sl or "terminproc" in sl:
+                        patterns.append({"pattern": "process_kill", "confidence": 0.85, "location": f"string_{i}"})
+                    if "devcon" in sl and "remove" in sl:
+                        patterns.append({"pattern": "pnp_remove", "confidence": 0.95, "location": f"string_{i}"})
+                    if sl.endswith(".sys"):
+                        patterns.append({"pattern": "driver_file_op", "confidence": 0.7, "location": f"string_{i}"})
+                    if sl.endswith(".exe") or sl.endswith(".dll"):
+                        if "inject" in sl or "kshut" in sl or "payload" in sl:
+                            patterns.append({"pattern": "dll_injection_artifact", "confidence": 0.8, "location": f"string_{i}"})
+                    if "customaction" in sl:
+                        patterns.append({"pattern": "msi_custom_action", "confidence": 0.9, "location": f"string_{i}"})
+                    if "powershell" in sl or "cmd.exe" in sl or "wscript" in sl:
+                        patterns.append({"pattern": "script_execution", "confidence": 0.8, "location": f"string_{i}"})
+
+                adapter_info = {"type": type_label, "strings": len(parsed.strings)}
+                # Add format-specific fields
+                for attr in ("version", "product_name", "manufacturer", "python_version",
+                             "volume_id", "package_name", "publisher", "compression",
+                             "num_files", "num_entries", "is_uninstaller"):
+                    val = getattr(parsed, attr, None)
+                    if val is not None and val != "" and val != 0 and val is not False:
+                        adapter_info[attr] = val
+
+                result["stages"]["adapter"] = adapter_info
+                result["stages"]["patterns"] = {"matches": patterns}
+                result["stages"]["chains"] = {"chains": [], "count": 0}
+                result["stages"]["architecture"] = {"type": fmt.lower()}
+                for stage in ("callgraph", "depgraph"):
+                    result["stages"][stage] = {"skipped": True, "reason": f"{type_label} package"}
+
+                result["summary"] = {
+                    "format": fmt, "arch": info.arch, "packed": info.packed,
+                    "strings": len(parsed.strings),
+                    "stages_completed": 8, "stages_total": 8,
+                }
+                return result
+        except Exception as e:
+            result["stages"]["adapter"] = {"type": type_label, "error": str(e)}
+
     if fmt.startswith("PE") and PEAdapter is not None:
         try:
             adapter = PEAdapter(path)

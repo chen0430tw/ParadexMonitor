@@ -35,17 +35,78 @@ def detect(path: str) -> FileInfo:
         if magic[4:8] == b"\x01\x14\x02\x00":
             return FileInfo(path=path, format="LNK", arch="n/a")
 
-    # PE (MZ header) — also check for NSIS installer inside PE
+    # MSI (OLE2 Compound Binary File)
+    if magic[:4] == b"\xD0\xCF\x11\xE0":
+        try:
+            from ppm_engine.adapters.msi import is_msi
+            if is_msi(path):
+                return FileInfo(path=path, format="MSI", arch="n/a", packer="MSI")
+        except Exception:
+            pass
+        return FileInfo(path=path, format="OLE2", arch="n/a")
+
+    # ISO 9660 — check magic at sector 16
+    if len(magic) >= 8:
+        try:
+            from ppm_engine.adapters.iso import is_iso
+            if is_iso(path):
+                return FileInfo(path=path, format="ISO", arch="n/a")
+        except Exception:
+            pass
+
+    # MSIX / AppX (ZIP with AppxManifest.xml)
+    if magic[:2] == b"PK":
+        try:
+            from ppm_engine.adapters.msix import is_msix
+            if is_msix(path):
+                return FileInfo(path=path, format="MSIX", arch="n/a")
+        except Exception:
+            pass
+
+    # PE (MZ header) — check for NSIS, Inno Setup, PyInstaller, 7z SFX inside PE
     if magic[:2] == b"MZ":
         info = _detect_pe(path)
-        # Check if this PE is actually an NSIS installer
         try:
-            from ppm_engine.adapters.nsis import is_nsis
             with open(p, "rb") as f:
-                pe_data = f.read(1024 * 1024)  # first 1MB
+                pe_data = f.read(2 * 1024 * 1024)  # first 2MB
+
+            # NSIS
+            from ppm_engine.adapters.nsis import is_nsis
             if is_nsis(pe_data):
                 info.format = "NSIS_" + ("UNINST" if info.format.startswith("PE32") else "INST")
                 info.packer = "NSIS"
+                return info
+
+            # Inno Setup
+            try:
+                from ppm_engine.adapters.inno import is_inno_setup
+                if is_inno_setup(pe_data):
+                    info.format = "INNO_SETUP"
+                    info.packer = "Inno Setup"
+                    return info
+            except Exception:
+                pass
+
+            # PyInstaller
+            try:
+                from ppm_engine.adapters.pyinst import is_pyinstaller
+                if is_pyinstaller(pe_data):
+                    info.format = "PYINSTALLER"
+                    info.packer = "PyInstaller"
+                    return info
+            except Exception:
+                pass
+
+            # 7z SFX
+            try:
+                from ppm_engine.adapters.sfx7z import is_sfx7z
+                if is_sfx7z(pe_data):
+                    info.format = "SFX_7Z"
+                    info.packer = "7z SFX"
+                    return info
+            except Exception:
+                pass
+
         except Exception:
             pass
         return info
