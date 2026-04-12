@@ -68,16 +68,16 @@ def _read_string_at(data: bytes, offset: int) -> str:
 
 
 def parse(path: str) -> Optional[IShieldInfo]:
-    """Parse an InstallShield CAB file and extract file listing."""
+    """Parse an InstallShield CAB (or .hdr) file and extract file listing."""
+    p = Path(path)
     try:
-        data = Path(path).read_bytes()
+        data = p.read_bytes()
     except Exception:
         return None
 
     if len(data) < 20:
         return None
 
-    # Parse common header
     sig, version, volume_info, desc_offset, desc_size = _COMMON_HEADER.unpack_from(data, 0)
 
     if sig != _CAB_SIGNATURE:
@@ -88,9 +88,27 @@ def parse(path: str) -> Optional[IShieldInfo]:
     info.cab_size = len(data)
     info.strings.append(f"InstallShield CAB v{version}")
 
-    # Check if descriptor is within file bounds
-    if desc_offset + desc_size > len(data) or desc_size < 100:
-        # Can't parse descriptor, just report basic info
+    # V6+: descriptor is often in the .hdr file, not the .cab
+    # If desc_size is 0, try to find the companion .hdr file
+    if desc_size == 0 or desc_offset + desc_size > len(data):
+        hdr_path = p.with_suffix(".hdr")
+        if not hdr_path.exists():
+            # Try data1.hdr in same directory
+            hdr_path = p.parent / (p.stem + ".hdr")
+        if hdr_path.exists():
+            try:
+                hdr_data = hdr_path.read_bytes()
+                if len(hdr_data) >= 20:
+                    h_sig, h_ver, h_vi, h_off, h_size = _COMMON_HEADER.unpack_from(hdr_data, 0)
+                    if h_sig == _CAB_SIGNATURE and h_size > 0 and h_off + h_size <= len(hdr_data):
+                        data = hdr_data
+                        desc_offset = h_off
+                        desc_size = h_size
+                        info.strings.append(f"Header from: {hdr_path.name}")
+            except Exception:
+                pass
+
+    if desc_size == 0 or desc_offset + desc_size > len(data):
         return info
 
     desc = data[desc_offset:desc_offset + desc_size]
@@ -119,101 +137,85 @@ def parse(path: str) -> Optional[IShieldInfo]:
     #   +0x2E: file_table_offset2 (4)
 
     try:
-        if version < 6:
-            # V5 layout
-            if len(desc) > 0x30:
-                file_table_off = struct.unpack_from("<I", desc, 0x0C)[0]
-                dir_count = struct.unpack_from("<I", desc, 0x18)[0]
-                file_count = struct.unpack_from("<I", desc, 0x24)[0]
-                file_table_off2 = struct.unpack_from("<I", desc, 0x28)[0]
-            else:
-                return info
+        # CabDescriptor field offsets (from unshield libunshield.c):
+        # Both V5 and V6 use the same descriptor layout:
+        #   +0x0C: file_table_offset
+        #   +0x14: file_table_size
+        #   +0x18: file_table_size2
+        #   +0x1C: directory_count
+        #   +0x28: file_count
+        #   +0x2C: file_table_offset2
+        if len(desc) > 0x30:
+            file_table_off = struct.unpack_from("<I", desc, 0x0C)[0]
+            file_table_size = struct.unpack_from("<I", desc, 0x14)[0]
+            file_table_size2 = struct.unpack_from("<I", desc, 0x18)[0]
+            dir_count = struct.unpack_from("<I", desc, 0x1C)[0]
+            file_count = struct.unpack_from("<I", desc, 0x28)[0]
+            file_table_off2 = struct.unpack_from("<I", desc, 0x2C)[0]
         else:
-            # V6+ layout
-            if len(desc) > 0x36:
-                file_table_off = struct.unpack_from("<I", desc, 0x12)[0]
-                dir_count = struct.unpack_from("<I", desc, 0x1E)[0]
-                file_count = struct.unpack_from("<I", desc, 0x2A)[0]
-                file_table_off2 = struct.unpack_from("<I", desc, 0x2E)[0]
-            else:
-                return info
+            return info
 
         info.num_dirs = dir_count
         info.num_files = file_count
         info.strings.append(f"Directories: {dir_count}")
         info.strings.append(f"Files: {file_count}")
 
-        # Read directory names from file table
-        # Directory entries are at file_table_off, each is a 4-byte offset to string
-        ft_base = desc_offset + file_table_off
-        for i in range(min(dir_count, 256)):
-            name_off_pos = ft_base + i * 4
-            if name_off_pos + 4 > len(data):
+        # File table: array of uint32 offsets at desc_offset + file_table_offset
+        # First directory_count entries are directories, next file_count are files
+        # Each offset points to a string relative to file table start
+        ft_abs = desc_offset + file_table_off  # absolute offset in data
+        total_entries = dir_count + file_count
+        file_table = []
+        for i in range(min(total_entries, 10000)):
+            pos = ft_abs + i * 4
+            if pos + 4 > len(data):
                 break
-            name_off = struct.unpack_from("<I", data, name_off_pos)[0]
-            name = _read_string_at(data, ft_base + name_off)
+            file_table.append(struct.unpack_from("<I", data, pos)[0])
+
+        # Read directory names (first dir_count entries)
+        for i in range(min(dir_count, len(file_table))):
+            name = _read_string_at(data, ft_abs + file_table[i])
             if name:
                 info.directories.append(name)
                 info.strings.append(f"Dir: {name}")
 
-        # Read file descriptors
-        # File descriptors start after directory table
-        # V5: each descriptor is 0x3A bytes
-        # V6: each descriptor is 0x57 bytes
-        fd_size = 0x3A if version < 6 else 0x57
-        fd_base = ft_base + file_table_off2 if file_table_off2 else ft_base + dir_count * 4
-
-        for i in range(min(file_count, 10000)):
-            fd_pos = fd_base + i * fd_size
-            if fd_pos + fd_size > len(data):
+        # Read file descriptors (next file_count entries)
+        # File descriptor is at the offset pointed to by file_table[dir_count + i]
+        # Each descriptor starts with: name_offset(4) + dir_index(4) + flags(2) + sizes...
+        for i in range(min(file_count, len(file_table) - dir_count)):
+            ft_idx = dir_count + i
+            if ft_idx >= len(file_table):
+                break
+            fd_abs = ft_abs + file_table[ft_idx]
+            if fd_abs + 0x14 > len(data):
                 break
 
             try:
-                # Common fields at start of file descriptor:
-                # +0x00: name_offset (4)
-                # +0x04: directory_index (4)
-                # +0x08: flags (2)
-                # +0x0A: expanded_size (4) [or 8 bytes for V6+]
-                # +0x0E: compressed_size (4) [or 8 bytes for V6+]
-                name_off = struct.unpack_from("<I", data, fd_pos)[0]
-                dir_idx = struct.unpack_from("<I", data, fd_pos + 4)[0]
-                flags = struct.unpack_from("<H", data, fd_pos + 8)[0]
+                name_off = struct.unpack_from("<I", data, fd_abs)[0]
+                dir_idx = struct.unpack_from("<I", data, fd_abs + 4)[0]
+                flags = struct.unpack_from("<H", data, fd_abs + 8)[0]
+                exp_size = struct.unpack_from("<I", data, fd_abs + 0x0A)[0]
+                comp_size = struct.unpack_from("<I", data, fd_abs + 0x12)[0]
 
-                if version < 6:
-                    exp_size = struct.unpack_from("<I", data, fd_pos + 0x0A)[0]
-                    comp_size = struct.unpack_from("<I", data, fd_pos + 0x0E)[0]
-                else:
-                    exp_size = struct.unpack_from("<Q", data, fd_pos + 0x0A)[0]
-                    comp_size = struct.unpack_from("<Q", data, fd_pos + 0x12)[0]
-
-                # Read filename
-                fname = _read_string_at(data, ft_base + name_off)
+                fname = _read_string_at(data, ft_abs + name_off)
                 if not fname:
                     fname = f"file_{i}"
 
-                # Build full path
                 dirname = info.directories[dir_idx] if dir_idx < len(info.directories) else ""
                 fullpath = f"{dirname}\\{fname}" if dirname else fname
 
                 info.files.append(fullpath)
 
-                # Flag attributes
                 attrs = []
-                if flags & _FILE_COMPRESSED:
-                    attrs.append("compressed")
-                if flags & _FILE_OBFUSCATED:
-                    attrs.append("obfuscated")
-                if flags & _FILE_SPLIT:
-                    attrs.append("split")
-
+                if flags & _FILE_COMPRESSED: attrs.append("compressed")
+                if flags & _FILE_OBFUSCATED: attrs.append("obfuscated")
+                if flags & _FILE_SPLIT: attrs.append("split")
                 attr_str = f" [{','.join(attrs)}]" if attrs else ""
                 info.strings.append(f"File: {fullpath} ({exp_size} bytes){attr_str}")
 
-                # Flag suspicious files
                 lower = fname.lower()
                 if lower.endswith(('.exe', '.dll', '.sys', '.scr', '.bat', '.cmd', '.ps1', '.vbs')):
                     info.strings.append(f"Executable: {fullpath}")
-
             except Exception:
                 continue
 
