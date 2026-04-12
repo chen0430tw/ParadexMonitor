@@ -67,24 +67,29 @@ def detect(path: str) -> FileInfo:
         except Exception:
             pass
 
-    # PE (MZ header) — check for NSIS, Inno Setup, PyInstaller, 7z SFX inside PE
+    # PE (MZ header) — fast-path checks before slow pefile parsing
     if magic[:2] == b"MZ":
+        # Read header for fast format detection (before pefile)
+        with open(p, "rb") as f:
+            pe_header = f.read(200000)  # 200KB for Squirrel/NSIS signatures
+
+        # Squirrel (Electron) — check first, it's a simple string match
+        try:
+            from ppm_engine.adapters.squirrel import is_squirrel
+            if is_squirrel(pe_header):
+                # Minimal PE info without full pefile parse
+                return FileInfo(path=path, format="SQUIRREL", arch="x86",
+                                packed=True, packer="Squirrel (Electron)")
+        except Exception:
+            pass
+
+        # Full PE detection (slow for large files)
         info = _detect_pe(path)
         try:
             with open(p, "rb") as f:
                 pe_data = f.read(2 * 1024 * 1024)  # first 2MB
 
-            # Squirrel (Electron installer)
-            try:
-                from ppm_engine.adapters.squirrel import is_squirrel
-                if is_squirrel(pe_data):
-                    info.format = "SQUIRREL"
-                    info.packer = "Squirrel (Electron)"
-                    return info
-            except Exception:
-                pass
-
-            # Node.js / Bun SEA
+            # Node.js / Bun SEA (needs section scan, done after pefile)
             try:
                 from ppm_engine.adapters.node_sea import is_node_sea
                 if is_node_sea(pe_data):

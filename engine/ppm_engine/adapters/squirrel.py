@@ -44,39 +44,74 @@ def is_squirrel(data: bytes) -> bool:
 
 def parse(path: str) -> Optional[SquirrelInfo]:
     """Parse a Squirrel installer and extract embedded nupkg contents."""
-    data = Path(path).read_bytes()
+    fsize = Path(path).stat().st_size
 
-    if not is_squirrel(data):
+    # Only read header (200KB) for Squirrel detection — don't load entire file
+    with open(path, "rb") as f:
+        header = f.read(200000)
+    if not is_squirrel(header):
         return None
 
     info = SquirrelInfo()
     info.strings.append("Squirrel Installer (Electron)")
 
-    # Find embedded ZIP (nupkg) - search for PK signature
-    # The nupkg is typically the largest ZIP embedded in .rsrc
-    best_zip = None
-    best_count = 0
-    idx = 0
-    while idx < len(data) - 4:
-        pos = data.find(b"PK\x03\x04", idx)
-        if pos == -1:
-            break
+    # Find embedded nupkg using EOCD (End of Central Directory) from file tail.
+    # Only reads the last 65KB + the ZIP Central Directory — no full file load.
+    zip_start = -1
+    nupkg_zf = None
+
+    with open(path, "rb") as f:
+        # Read tail to find EOCD
+        tail_size = min(fsize, 65536 + 22)
+        f.seek(fsize - tail_size)
+        tail = f.read(tail_size)
+        eocd_pos = tail.rfind(b"PK\x05\x06")
+
+        if eocd_pos != -1:
+            eocd_abs = fsize - tail_size + eocd_pos
+            cd_offset = struct.unpack_from("<I", tail, eocd_pos + 16)[0]
+
+            # Find first PK\x03\x04 near the CD offset area
+            search_pos = max(0, cd_offset - 256)
+            f.seek(search_pos)
+            chunk = f.read(512)
+            pk_idx = chunk.find(b"PK\x03\x04")
+            if pk_idx != -1:
+                zip_start = search_pos + pk_idx
+
+    # Open ZIP directly from file (zipfile handles offset-based reads)
+    if zip_start >= 0:
         try:
-            zf = zipfile.ZipFile(io.BytesIO(data[pos:]))
-            names = zf.namelist()
-            if len(names) > best_count:
-                best_count = len(names)
-                best_zip = (pos, zf)
-            else:
-                zf.close()
+            # Create a wrapper that offsets reads
+            class OffsetFile:
+                def __init__(self, fp, offset, size):
+                    self._fp = open(fp, "rb")
+                    self._offset = offset
+                    self._size = size
+                    self._pos = 0
+                def read(self, n=-1):
+                    self._fp.seek(self._offset + self._pos)
+                    if n == -1: n = self._size - self._pos
+                    data = self._fp.read(min(n, self._size - self._pos))
+                    self._pos += len(data)
+                    return data
+                def seek(self, pos, whence=0):
+                    if whence == 0: self._pos = pos
+                    elif whence == 1: self._pos += pos
+                    elif whence == 2: self._pos = self._size + pos
+                def tell(self): return self._pos
+                def close(self): self._fp.close()
+                def __enter__(self): return self
+                def __exit__(self, *a): self.close()
+
+            of = OffsetFile(path, zip_start, fsize - zip_start)
+            nupkg_zf = zipfile.ZipFile(of)
         except Exception:
             pass
-        idx = pos + 4
-        if best_count > 10:
-            break  # Good enough
 
-    if best_zip:
-        nupkg_offset, zf = best_zip
+    if nupkg_zf:
+        zf = nupkg_zf
+        info.nupkg_offset = zip_start
         info.nupkg_offset = nupkg_offset
         info.strings.append(f"NuPkg at offset {nupkg_offset}")
 
