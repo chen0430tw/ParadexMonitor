@@ -2,7 +2,7 @@
 
 Binary reconstruction & kernel inspection platform.
 
-PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) and automatically reconstructs its architecture: what callbacks it registers, what APIs it calls, what attack chains it implements -- in seconds, not hours.
+PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) or installer package (.exe NSIS/Inno/SF) and automatically reconstructs its architecture: what callbacks it registers, what APIs it calls, what attack chains it implements -- in seconds, not hours.
 
 ## Supported Formats
 
@@ -12,6 +12,7 @@ PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) a
 | **ELF** (Linux binaries/ko) | `ELFAdapter` | PLT calls, imports, strings, kernel module detection |
 | **Mach-O** (macOS/iOS) | `MachOAdapter` | dyld bindings, stub resolution (ARM64+x64), indirect symbol table |
 | **LNK** (Windows shortcuts) | `LNKAdapter` | Target/args extraction, LOLBin/Base64/hidden window risk assessment |
+| **NSIS** (Nullsoft installer) | `nsis` adapter | LZMA/Zlib/Bzip2 decompression, string table extraction with variable expansion ($INSTDIR, $TEMP, shell folders), 87-opcode script bytecode decoding, pattern/chain topology analysis |
 | **Media/docs** | detect only | JPEG, PNG, WAV, PDF, ZIP, MP4, TEXT, and 12 more |
 
 Non-binary formats (images, audio, text) are correctly identified and rejected -- no crashes on unexpected input.
@@ -71,6 +72,14 @@ format    packer     unified    call         queryable    ob_cb      entry->cb  
 | `apc_inject` | APC injection chain (notify+process+memory+APC) | 0.4-0.9 |
 | `dkom` | Direct Kernel Object Manipulation (PsLoadedModuleList, ActiveProcessLinks) | 0.3-0.8 |
 | `handle_strip` | Handle access bit stripping (AND mask pattern) | 0.7-0.85 |
+| `xor_payload` | XOR-encoded payload/config data | 0.5-0.9 |
+| **NSIS-specific:** | | |
+| `service_control` | advapi32 ControlService/OpenService calls | 0.9 |
+| `service_delete` | advapi32 DeleteService | 0.9 |
+| `process_kill` | TerminateProcess / TerminProc | 0.85 |
+| `pnp_remove` | devcon remove / PnP device removal | 0.95 |
+| `driver_file_op` | .sys file manipulation (delete/copy) | 0.7 |
+| `dll_injection_artifact` | Suspicious DLL references (kshut, inject) | 0.8 |
 
 ### depgraph Queries
 
