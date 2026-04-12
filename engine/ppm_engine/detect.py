@@ -35,6 +35,10 @@ def detect(path: str) -> FileInfo:
         if magic[4:8] == b"\x01\x14\x02\x00":
             return FileInfo(path=path, format="LNK", arch="n/a")
 
+    # InstallShield CAB (signature: 0x28635349 = "ISc(")
+    if magic[:4] == b"\x49\x53\x63\x28":
+        return FileInfo(path=path, format="INSTALLSHIELD", arch="n/a", packer="InstallShield")
+
     # MSI (OLE2 Compound Binary File)
     if magic[:4] == b"\xD0\xCF\x11\xE0":
         try:
