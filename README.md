@@ -2,7 +2,7 @@
 
 Binary reconstruction & kernel inspection platform.
 
-PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) or installer package (.exe NSIS/Inno/SF) and automatically reconstructs its architecture: what callbacks it registers, what APIs it calls, what attack chains it implements -- in seconds, not hours.
+PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) or installer package (NSIS, MSI, Inno Setup, InstallShield, Setup Factory, 7z SFX, ISO, PyInstaller, MSIX) and automatically reconstructs its architecture: what callbacks it registers, what APIs it calls, what attack chains it implements -- in seconds, not hours.
 
 ## Supported Formats
 
@@ -13,6 +13,14 @@ PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) o
 | **Mach-O** (macOS/iOS) | `MachOAdapter` | dyld bindings, stub resolution (ARM64+x64), indirect symbol table |
 | **LNK** (Windows shortcuts) | `LNKAdapter` | Target/args extraction, LOLBin/Base64/hidden window risk assessment |
 | **NSIS** (Nullsoft installer) | `nsis` adapter | LZMA/Zlib/Bzip2 decompression, string table extraction with variable expansion ($INSTDIR, $TEMP, shell folders), 87-opcode script bytecode decoding, pattern/chain topology analysis |
+| **MSI** (Windows Installer) | `msi` adapter | OLE2 parsing, CustomAction/File/Registry/Property table extraction |
+| **Inno Setup** | `inno` adapter | Signature detection, LZMA decompression, string extraction |
+| **Setup Factory** | `sfactory` adapter | Via sfextract library (CybercentreCanada) |
+| **InstallShield** | `ishield` adapter | Pure Python port of unshield core (V5 file_table + V6 linear descriptor) |
+| **7z SFX** | `sfx7z` adapter | 7z magic detection after PE stub, py7zr file listing |
+| **ISO** (ISO 9660/UDF) | `iso` adapter | pycdlib directory tree, suspicious executable flagging |
+| **PyInstaller** | `pyinst` adapter | MEI/TOC parsing, entry scripts + module + binary extraction |
+| **MSIX/AppX** | `msix` adapter | ZIP + AppxManifest.xml capabilities/permissions |
 | **Media/docs** | detect only | JPEG, PNG, WAV, PDF, ZIP, MP4, TEXT, and 12 more |
 
 Non-binary formats (images, audio, text) are correctly identified and rejected -- no crashes on unexpected input.
