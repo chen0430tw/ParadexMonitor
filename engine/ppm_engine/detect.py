@@ -74,6 +74,26 @@ def detect(path: str) -> FileInfo:
             with open(p, "rb") as f:
                 pe_data = f.read(2 * 1024 * 1024)  # first 2MB
 
+            # Squirrel (Electron installer)
+            try:
+                from ppm_engine.adapters.squirrel import is_squirrel
+                if is_squirrel(pe_data):
+                    info.format = "SQUIRREL"
+                    info.packer = "Squirrel (Electron)"
+                    return info
+            except Exception:
+                pass
+
+            # Node.js / Bun SEA
+            try:
+                from ppm_engine.adapters.node_sea import is_node_sea
+                if is_node_sea(pe_data):
+                    info.format = "NODE_SEA"
+                    info.packer = "Node.js/Bun SEA"
+                    return info
+            except Exception:
+                pass
+
             # NSIS
             from ppm_engine.adapters.nsis import is_nsis
             if is_nsis(pe_data):

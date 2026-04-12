@@ -318,7 +318,7 @@ def _handle_analyze(req: dict) -> dict:
         # Fall through to PE analysis if NSIS parsing fails
         fmt = info.format.replace("NSIS_UNINST", "PE32").replace("NSIS_INST", "PE32")
 
-    elif fmt in ("INNO_SETUP", "PYINSTALLER", "SFX_7Z", "MSI", "ISO", "MSIX", "INSTALLSHIELD"):
+    elif fmt in ("INNO_SETUP", "PYINSTALLER", "SFX_7Z", "MSI", "ISO", "MSIX", "INSTALLSHIELD", "SQUIRREL", "NODE_SEA"):
         # Generic installer analysis — parse with format-specific adapter,
         # then run string-based pattern detection
         adapter_map = {
@@ -329,6 +329,8 @@ def _handle_analyze(req: dict) -> dict:
             "ISO": ("ppm_engine.adapters.iso", "parse", "ISO"),
             "MSIX": ("ppm_engine.adapters.msix", "parse", "MSIX"),
             "INSTALLSHIELD": ("ppm_engine.adapters.ishield", "parse", "InstallShield"),
+            "SQUIRREL": ("ppm_engine.adapters.squirrel", "parse", "Squirrel"),
+            "NODE_SEA": ("ppm_engine.adapters.node_sea", "parse", "Node.js/Bun SEA"),
         }
         mod_path, func_name, type_label = adapter_map[fmt]
         try:
