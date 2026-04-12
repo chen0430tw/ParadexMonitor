@@ -78,6 +78,12 @@ def main(argv: list[str] | None = None):
     p = sub.add_parser("risk", help="Analyze LNK shortcut risk")
     p.add_argument("file", help="Path to .lnk file")
 
+    # nsis
+    p = sub.add_parser("nsis", help="Extract NSIS installer strings and script")
+    p.add_argument("file", help="Path to NSIS installer/uninstaller (.exe)")
+    p.add_argument("--strings-only", action="store_true", help="Only show string table")
+    p.add_argument("--filter", help="Filter strings by keyword (case-insensitive)")
+
     args = parser.parse_args(argv)
 
     if args.version:
@@ -119,6 +125,8 @@ def _dispatch(args):
         _cmd_pseudo(args)
     elif cmd == "risk":
         _cmd_risk(args)
+    elif cmd == "nsis":
+        _cmd_nsis(args)
 
 
 # ------------------------------------------------------------------
@@ -506,9 +514,58 @@ def _make_adapter(path: str):
     elif fmt == "LNK":
         from ppm_engine.adapters.lnk import LNKAdapter
         return LNKAdapter(path)
+    elif fmt.startswith("NSIS"):
+        from ppm_engine.adapters.pe import PEAdapter
+        return PEAdapter(path)
     else:
         print(f"Error: unsupported format '{fmt}' for {path}", file=sys.stderr)
         sys.exit(1)
+
+
+def _cmd_nsis(args):
+    """Parse NSIS installer and display strings/script."""
+    from ppm_engine.adapters.nsis import parse
+    path = args.file
+    info = parse(path)
+    if info is None:
+        print(f"Error: {path} is not an NSIS installer")
+        sys.exit(1)
+
+    name = os.path.basename(path)
+    print(f"{name}: NSIS{'3 Unicode' if info.unicode else '2'}"
+          f" ({'uninstaller' if info.is_uninstaller else 'installer'})")
+    print(f"  Compression: {info.compression}")
+    print(f"  Stub size: {info.stub_size} bytes")
+    print(f"  Strings: {info.num_strings}")
+    print(f"  Entries: {info.num_entries}")
+    if info.sections:
+        print(f"  Sections: {len(info.sections)}")
+
+    filt = (args.filter or "").lower() if hasattr(args, "filter") and args.filter else ""
+
+    if info.strings:
+        print(f"\n  === String Table ({info.num_strings} strings) ===")
+        for i, s in enumerate(info.strings):
+            if filt and filt not in s.lower():
+                continue
+            print(f"  {i:4d}: {s}")
+
+    if not (hasattr(args, "strings_only") and args.strings_only) and info.entries:
+        # Show interesting entries (non-nop, non-invalid)
+        interesting = [(i, op, p) for i, (op, p) in enumerate(info.entries)
+                       if op not in ("Invalid", "Nop", "Return", "op_0")]
+        if interesting:
+            print(f"\n  === Script Entries ({len(interesting)} interesting / {info.num_entries} total) ===")
+            for idx, op, params in interesting[:200]:
+                # Resolve string references in params
+                resolved = []
+                for p in params:
+                    if 0 < p < len(info.strings):
+                        resolved.append(f'"{info.strings[p]}"')
+                    elif p != 0:
+                        resolved.append(f"0x{p:X}")
+                param_str = ", ".join(resolved) if resolved else ""
+                print(f"  {idx:4d}: {op}({param_str})")
 
 
 def _print_tree(tree: dict, indent: int = 0):

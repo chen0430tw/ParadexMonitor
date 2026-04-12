@@ -35,9 +35,20 @@ def detect(path: str) -> FileInfo:
         if magic[4:8] == b"\x01\x14\x02\x00":
             return FileInfo(path=path, format="LNK", arch="n/a")
 
-    # PE (MZ header)
+    # PE (MZ header) — also check for NSIS installer inside PE
     if magic[:2] == b"MZ":
-        return _detect_pe(path)
+        info = _detect_pe(path)
+        # Check if this PE is actually an NSIS installer
+        try:
+            from ppm_engine.adapters.nsis import is_nsis
+            with open(p, "rb") as f:
+                pe_data = f.read(1024 * 1024)  # first 1MB
+            if is_nsis(pe_data):
+                info.format = "NSIS_" + ("UNINST" if info.format.startswith("PE32") else "INST")
+                info.packer = "NSIS"
+        except Exception:
+            pass
+        return info
 
     # ELF
     if magic[:4] == b"\x7fELF":
