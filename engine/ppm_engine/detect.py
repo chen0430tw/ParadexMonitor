@@ -87,10 +87,15 @@ def detect(path: str) -> FileInfo:
             except Exception:
                 pass
 
-            # PyInstaller
+            # PyInstaller (MEI magic is at END of file, not beginning)
             try:
                 from ppm_engine.adapters.pyinst import is_pyinstaller
-                if is_pyinstaller(pe_data):
+                with open(p, "rb") as f:
+                    f.seek(0, 2)
+                    fsize = f.tell()
+                    f.seek(max(0, fsize - 4096))
+                    tail = f.read()
+                if is_pyinstaller(tail):
                     info.format = "PYINSTALLER"
                     info.packer = "PyInstaller"
                     return info
