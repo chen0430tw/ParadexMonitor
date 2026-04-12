@@ -83,21 +83,20 @@ def detect(path: str) -> FileInfo:
         except Exception:
             pass
 
+        # Node.js / Bun SEA — section table is in header, no pefile needed
+        try:
+            from ppm_engine.adapters.node_sea import is_node_sea
+            if is_node_sea(pe_header):
+                return FileInfo(path=path, format="NODE_SEA", arch="x64",
+                                packed=True, packer="Node.js/Bun SEA")
+        except Exception:
+            pass
+
         # Full PE detection (slow for large files)
         info = _detect_pe(path)
         try:
             with open(p, "rb") as f:
                 pe_data = f.read(2 * 1024 * 1024)  # first 2MB
-
-            # Node.js / Bun SEA (needs section scan, done after pefile)
-            try:
-                from ppm_engine.adapters.node_sea import is_node_sea
-                if is_node_sea(pe_data):
-                    info.format = "NODE_SEA"
-                    info.packer = "Node.js/Bun SEA"
-                    return info
-            except Exception:
-                pass
 
             # NSIS
             from ppm_engine.adapters.nsis import is_nsis

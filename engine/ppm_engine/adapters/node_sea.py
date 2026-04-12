@@ -47,27 +47,41 @@ _BUN_MARKERS = [
 
 
 def is_node_sea(data: bytes) -> bool:
-    """Check if PE is a Node.js or Bun Single Executable Application."""
-    if data[:2] != b"MZ":
+    """Check if PE is a Node.js or Bun Single Executable Application.
+
+    Fast path: read PE section table directly from header (< 1KB),
+    no pefile needed. Section table location:
+      e_lfanew (offset 0x3C) → PE signature → COFF header → section table
+    """
+    if len(data) < 0x40 or data[:2] != b"MZ":
         return False
-    # Check for .bun section or NODE_SEA markers
-    # Quick check: search in first 1MB for markers
-    header = data[:1024 * 1024]
+
+    # Read PE section names from header (no pefile, no full file load)
+    try:
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        if e_lfanew + 24 > len(data):
+            return False
+        # PE sig at e_lfanew, COFF header at +4, optional header size at +20
+        num_sections = struct.unpack_from("<H", data, e_lfanew + 6)[0]
+        opt_hdr_size = struct.unpack_from("<H", data, e_lfanew + 20)[0]
+        # Section table starts after optional header
+        sec_table = e_lfanew + 24 + opt_hdr_size
+        for i in range(min(num_sections, 32)):
+            sec_off = sec_table + i * 40  # each section header = 40 bytes
+            if sec_off + 8 > len(data):
+                break
+            name = data[sec_off:sec_off + 8].rstrip(b"\x00")
+            if name == b".bun":
+                return True
+    except Exception:
+        pass
+
+    # Fallback: check for NODE_SEA markers in header area
+    header = data[:min(len(data), 512 * 1024)]
     for marker in _NODE_SEA_MARKERS:
         if marker in header:
             return True
-    # Check PE section names for .bun
-    try:
-        import pefile
-        pe = pefile.PE(data=data, fast_load=True)
-        for sec in pe.sections:
-            name = sec.Name.rstrip(b"\x00").decode("ascii", errors="replace")
-            if name == ".bun":
-                pe.close()
-                return True
-        pe.close()
-    except Exception:
-        pass
+
     return False
 
 
