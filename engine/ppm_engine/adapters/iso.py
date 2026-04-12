@@ -53,7 +53,11 @@ def parse(path: str) -> Optional[ISOInfo]:
         pvd = iso.pvd
         info.volume_id = pvd.volume_identifier.decode('ascii', errors='replace').strip()
         info.system_id = pvd.system_identifier.decode('ascii', errors='replace').strip()
-        info.publisher = pvd.publisher_identifier.identifier.decode('ascii', errors='replace').strip()
+        try:
+            pub = pvd.publisher_identifier
+            info.publisher = (pub.identifier if hasattr(pub, 'identifier') else pub).decode('ascii', errors='replace').strip()
+        except Exception:
+            pass
 
         if info.volume_id:
             info.strings.append(f"Volume: {info.volume_id}")
