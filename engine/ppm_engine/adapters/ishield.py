@@ -179,23 +179,41 @@ def parse(path: str) -> Optional[IShieldInfo]:
                 info.directories.append(name)
                 info.strings.append(f"Dir: {name}")
 
-        # Read file descriptors (next file_count entries)
-        # File descriptor is at the offset pointed to by file_table[dir_count + i]
-        # Each descriptor starts with: name_offset(4) + dir_index(4) + flags(2) + sizes...
-        for i in range(min(file_count, len(file_table) - dir_count)):
-            ft_idx = dir_count + i
-            if ft_idx >= len(file_table):
-                break
-            fd_abs = ft_abs + file_table[ft_idx]
-            if fd_abs + 0x14 > len(data):
-                break
+        # Read file descriptors
+        # V5: uses file_table[dir_count + i] as offset from ft_abs
+        #     descriptor: name_off(+0,4) dir_idx(+4,2) _pad(+6,2) flags(+8,2)
+        #                 exp_size(+0xA,4) comp_size(+0xE,4)
+        # V6+: linear array at desc_off + ft_off + ft_off2, each 0x57 bytes
+        #     descriptor: flags(+0,2) exp_size(+2,8) comp_size(+0xA,8)
+        #                 data_off(+0x12,8) md5(+0x1A,16) _skip(+0x2A,16)
+        #                 name_off(+0x3A,4) dir_idx(+0x3E,2)
+        is_v6 = (version >= 6) or (version > 100000)
 
+        for i in range(min(file_count, 10000)):
             try:
-                name_off = struct.unpack_from("<I", data, fd_abs)[0]
-                dir_idx = struct.unpack_from("<I", data, fd_abs + 4)[0]
-                flags = struct.unpack_from("<H", data, fd_abs + 8)[0]
-                exp_size = struct.unpack_from("<I", data, fd_abs + 0x0A)[0]
-                comp_size = struct.unpack_from("<I", data, fd_abs + 0x12)[0]
+                if is_v6:
+                    # V6+: linear at desc_off + ft_off + ft_off2 + i * 0x57
+                    fd_abs = desc_offset + file_table_off + file_table_off2 + i * 0x57
+                    if fd_abs + 0x57 > len(data):
+                        break
+                    flags = struct.unpack_from("<H", data, fd_abs + 0x00)[0]
+                    exp_size = struct.unpack_from("<Q", data, fd_abs + 0x02)[0]
+                    comp_size = struct.unpack_from("<Q", data, fd_abs + 0x0A)[0]
+                    name_off = struct.unpack_from("<I", data, fd_abs + 0x3A)[0]
+                    dir_idx = struct.unpack_from("<H", data, fd_abs + 0x3E)[0]
+                else:
+                    # V5: file_table[dir_count + i] as offset
+                    ft_idx = dir_count + i
+                    if ft_idx >= len(file_table):
+                        break
+                    fd_abs = ft_abs + file_table[ft_idx]
+                    if fd_abs + 0x3A > len(data):
+                        break
+                    name_off = struct.unpack_from("<I", data, fd_abs + 0x00)[0]
+                    dir_idx = struct.unpack_from("<H", data, fd_abs + 0x04)[0]
+                    flags = struct.unpack_from("<H", data, fd_abs + 0x08)[0]
+                    exp_size = struct.unpack_from("<I", data, fd_abs + 0x0A)[0]
+                    comp_size = struct.unpack_from("<I", data, fd_abs + 0x0E)[0]
 
                 fname = _read_string_at(data, ft_abs + name_off)
                 if not fname:
