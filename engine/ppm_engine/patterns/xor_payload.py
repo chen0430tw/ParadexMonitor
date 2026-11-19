@@ -119,7 +119,8 @@ class XorPayloadPattern(Pattern):
         text_data = text_sec.get_data()
         text_rva = text_sec.VirtualAddress
 
-        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        from ..architecture import capstone_mode
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone_mode(pe))
         md.detail = True
 
         # Get function boundaries from callgraph
@@ -144,8 +145,8 @@ class XorPayloadPattern(Pattern):
             end = min(offset + func_size, len(text_data))
             chunk = text_data[offset:end]
 
-            has_xor = False
-            has_loop = False
+            xor_sites = []
+            loop_ranges = []
             xor_key_imm = None
 
             for insn in md.disasm(chunk, func_rva):
@@ -158,7 +159,7 @@ class XorPayloadPattern(Pattern):
                         a, b = ops[0].strip(), ops[1].strip()
                         # Skip xor reg, reg (zeroing pattern)
                         if a.lower() != b.lower():
-                            has_xor = True
+                            xor_sites.append(insn.address)
                             # Try to capture XOR key if immediate
                             b_strip = b.strip()
                             try:
@@ -172,11 +173,11 @@ class XorPayloadPattern(Pattern):
                     try:
                         target = int(insn.op_str.strip(), 0)
                         if target < insn.address:  # backward jump = loop
-                            has_loop = True
+                            loop_ranges.append((target, insn.address))
                     except ValueError:
                         pass
 
-            if has_xor and has_loop:
+            if any(start <= site < end for site in xor_sites for start, end in loop_ranges):
                 info = {"pattern": "xor_in_loop"}
                 if xor_key_imm is not None:
                     info["xor_key"] = f"0x{xor_key_imm:02X}"

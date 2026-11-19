@@ -29,6 +29,10 @@ All 15 format detections complete in < 0.35s regardless of file size (243MB Clau
 
 Non-binary formats (images, audio, text) are correctly identified and rejected -- no crashes on unexpected input.
 
+PE call graphs, pseudo-code, dataflow, and XOR-loop scans select x86 or x64 decoding from the PE headers. x86 API calls resolve absolute IAT addresses; argument recovery supports common cdecl/stdcall stack arguments. Register-based x86 thiscall/fastcall arguments and indirect register-call targets remain best-effort or unresolved. Function boundaries and pseudo-code are heuristic, not a full decompiler.
+
+Run architecture regression tests: `python -m unittest discover -s engine/tests -v` (with the engine installed).
+
 ## Quick Start
 
 ### Install Engine (Python)

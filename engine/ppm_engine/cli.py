@@ -421,7 +421,18 @@ def _cmd_pseudo(args):
 
     # Build maps
     import_map = {addr: fn.import_name for addr, fn in cg.functions.items() if fn.is_import}
-    string_map = {s["rva"]: s["value"] for s in adapter.strings(min_len=4)}
+    image_base = adapter._pe.OPTIONAL_HEADER.ImageBase
+    string_map = {}
+    for s in adapter.strings(min_len=4):
+        try:
+            # PEAdapter currently labels raw file offsets as "rva".
+            string_rva = adapter._pe.get_rva_from_offset(s["rva"])
+        except Exception:
+            continue
+        if string_rva is None:
+            continue  # Certificate/overlay strings have no mapped RVA.
+        string_map[string_rva] = s["value"]
+        string_map[image_base + string_rva] = s["value"]
 
     # Disassemble
     import capstone
@@ -443,7 +454,8 @@ def _cmd_pseudo(args):
     fn = cg.functions.get(rva)
     fn_size = min(fn.size if fn and fn.size else 0x400, 0x2000)
 
-    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    from ppm_engine.architecture import capstone_mode
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone_mode(adapter._pe))
     insns = list(md.disasm(text_data[offset:offset + fn_size], rva))
 
     # Trim at function boundary: stop at the LAST ret before the next
@@ -465,7 +477,7 @@ def _cmd_pseudo(args):
         if last_ret_idx >= 0:
             trimmed = trimmed[:last_ret_idx + 1]
 
-    gen = PseudoCodeGenerator()
+    gen = PseudoCodeGenerator(bitness=cg.bitness, image_base=image_base)
     pseudo = gen.generate(rva, trimmed, import_map, string_map)
     print(pseudo)
 

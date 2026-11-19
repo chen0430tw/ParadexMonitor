@@ -1,7 +1,7 @@
 """
 Build a call graph from a disassembled PE binary.
 
-Uses capstone for x86-64 disassembly to identify function boundaries,
+Uses capstone for x86 and x86-64 disassembly to identify function boundaries,
 call targets, and build a complete caller/callee graph.
 """
 from __future__ import annotations
@@ -11,11 +11,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ..architecture import capstone_mode, pe_bitness
+
 if TYPE_CHECKING:
     from ppm_engine.adapters.pe import PEAdapter
 
 try:
-    from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_GRP_CALL, CS_GRP_JUMP
+    from capstone import Cs, CS_ARCH_X86, CS_GRP_CALL
     _HAS_CAPSTONE = True
 except ImportError:
     _HAS_CAPSTONE = False
@@ -42,6 +44,11 @@ _PROLOGUES = [
     bytes([0x4C, 0x8B, 0xDC]),      # mov r11, rsp
     bytes([0xCC]),                   # int3 padding (not a prologue, but boundary marker)
 ]
+
+
+_X86_PROLOGUES = [b"\x8b\xff\x55\x8b\xec", b"\x55\x8b\xec",
+                  b"\x55\x89\xe5", b"\x83\xec", b"\x81\xec",
+                  b"\x53", b"\x55", b"\x56", b"\x57"]
 
 
 @dataclass
@@ -79,6 +86,8 @@ class CallGraph:
 
     def __init__(self) -> None:
         self.functions: dict[int, Function] = {}
+        self.bitness = 64
+        self.image_base = 0
 
     # ------------------------------------------------------------------
     # Construction
@@ -95,6 +104,8 @@ class CallGraph:
         5. Link caller -> callee bidirectionally.
         """
         graph = cls()
+        graph.bitness = pe_bitness(pe_adapter._pe)
+        graph.image_base = pe_adapter._pe.OPTIONAL_HEADER.ImageBase
 
         # --- Step 1: Import nodes ---
         iat_map = pe_adapter._build_iat_map()  # rva -> (dll, func)
@@ -149,7 +160,7 @@ class CallGraph:
         # Scan for common prologues
         for i in range(len(code)):
             rva_i = sec_rva + i
-            for prologue in _PROLOGUES:
+            for prologue in (_X86_PROLOGUES if graph.bitness == 32 else _PROLOGUES):
                 plen = len(prologue)
                 if prologue[0] == 0xCC:
                     continue  # skip int3, handled differently
@@ -167,13 +178,14 @@ class CallGraph:
             graph._scan_calls_raw(code, sec_rva, func_starts, iat_map)
             return graph
 
-        md = Cs(CS_ARCH_X86, CS_MODE_64)
+        md = Cs(CS_ARCH_X86, capstone_mode(pe_adapter._pe))
         md.detail = True
+        md.skipdata = True  # Continue past embedded data in executable sections.
 
         # First pass: collect all direct call targets as additional function starts
         call_targets: set[int] = set()
         for insn in md.disasm(code, sec_rva):
-            if insn.group(CS_GRP_CALL):
+            if insn.id and insn.group(CS_GRP_CALL):
                 # Direct call: E8 rel32
                 if insn.bytes[0] == 0xE8 and len(insn.bytes) == 5:
                     rel32 = struct.unpack_from("<i", bytes(insn.bytes), 1)[0]
@@ -210,7 +222,7 @@ class CallGraph:
             fn_code = code[offset:end]
 
             for insn in md.disasm(fn_code, fn_addr):
-                if not insn.group(CS_GRP_CALL):
+                if not insn.id or not insn.group(CS_GRP_CALL):
                     continue
 
                 target = None
@@ -222,7 +234,8 @@ class CallGraph:
                 # Indirect call via IAT: FF 15 disp32
                 elif len(insn.bytes) >= 6 and insn.bytes[0] == 0xFF and insn.bytes[1] == 0x15:
                     disp32 = struct.unpack_from("<i", bytes(insn.bytes), 2)[0]
-                    iat_rva = insn.address + 6 + disp32
+                    iat_rva = (insn.address + 6 + disp32 if graph.bitness == 64
+                               else (disp32 & 0xFFFFFFFF) - image_base)
                     if iat_rva in iat_map:
                         target = iat_rva
 
@@ -303,7 +316,8 @@ class CallGraph:
                 # FF 15 disp32 (IAT call)
                 if j < end - 5 and code[j] == 0xFF and code[j + 1] == 0x15:
                     disp32 = struct.unpack_from("<i", code, j + 2)[0]
-                    iat_rva = sec_rva + j + 6 + disp32
+                    iat_rva = (sec_rva + j + 6 + disp32 if self.bitness == 64
+                               else (disp32 & 0xFFFFFFFF) - self.image_base)
                     if iat_rva in self.functions and iat_rva not in fn.calls:
                         fn.calls.append(iat_rva)
                         self.functions[iat_rva].called_by.append(fn_addr)

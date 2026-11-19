@@ -1,22 +1,29 @@
 """
 Convert disassembly (capstone instruction list) to C-like pseudo-code.
 
-This is a *best-effort* lifter targeting x86-64 Windows kernel drivers.
+This is a *best-effort* lifter for x86/x64 Windows binaries.
 It handles the most common patterns seen in kernel callbacks:
 
     - Function prologue / epilogue
-    - IAT calls via FF 15 (call [rip+disp32])
+    - IAT calls via FF 15 (x86 absolute VA or x64 RIP-relative)
     - Register assignments (mov, xor, lea)
     - Comparisons + conditional jumps -> if/else blocks
     - Stack variable references
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 
 class PseudoCodeGenerator:
     """Lift disassembly to C-like pseudo-code."""
+
+    def __init__(self, bitness: int = 64, image_base: int = 0):
+        if bitness not in (32, 64):
+            raise ValueError("bitness must be 32 or 64")
+        self.bitness = bitness
+        self.image_base = image_base
 
     # Known API signatures for readable output
     API_SIGNATURES: dict[str, str] = {
@@ -126,10 +133,13 @@ class PseudoCodeGenerator:
                 if target is not None:
                     branch_targets.add(target)
 
+        history = []
         for i, insn in enumerate(disasm_lines):
             mn = self._get_mnemonic(insn)
             ops = self._get_op_str(insn)
             addr = self._get_address(insn)
+            prior = history[:]
+            history.append(insn)
 
             # Emit label if this address is a branch target
             if addr in branch_targets and in_function:
@@ -140,10 +150,10 @@ class PseudoCodeGenerator:
 
             # ---- Function prologue ----
             if not in_function and mn in ("push", "sub") and i < 3:
-                if mn == "push" and "rbp" in ops:
+                if mn == "push" and ops in ("rbp", "ebp"):
                     # push rbp — typical prologue
                     continue
-                if mn == "sub" and "rsp" in ops:
+                if mn == "sub" and ops.split(",")[0].strip() in ("rsp", "esp"):
                     stack_size = self._parse_imm(ops.split(",")[-1].strip())
                     lines.append(f"// Function at 0x{func_addr:X}")
                     lines.append(f"// Stack frame: {stack_size} bytes")
@@ -151,11 +161,11 @@ class PseudoCodeGenerator:
                     lines.append("{")
                     in_function = True
                     continue
-                if mn == "push" and i == 0:
+                if self.bitness == 64 and mn == "push" and i == 0:
                     # Single push at start — still prologue
                     continue
 
-            if not in_function and i == 0:
+            if not in_function:
                 lines.append(f"void sub_{func_addr:X}()")
                 lines.append("{")
                 in_function = True
@@ -247,7 +257,12 @@ class PseudoCodeGenerator:
             if mn == "call":
                 api_name = self._resolve_call(ops, addr, imports)
                 if api_name:
-                    args = self._build_arg_string(api_name, reg_state)
+                    if self.bitness == 32:
+                        from ..topology.dataflow import _resolve_stack_args_backward
+                        recovered = _resolve_stack_args_backward(prior)
+                        args = ", ".join(self._format_imm(a["value"], strings) for a in recovered) or "..."
+                    else:
+                        args = self._build_arg_string(api_name, reg_state)
                     lines.append(f"{pad}{api_name}({args});")
                 else:
                     # Direct call to sub-address
@@ -479,6 +494,14 @@ class PseudoCodeGenerator:
         for rva, name in imports.items():
             if isinstance(name, str) and name in op:
                 return name
+
+        if self.bitness == 32:
+            match = re.fullmatch(r"(?:dword ptr )?\[(0x[0-9a-f]+)\]", op.lower())
+            if match:
+                target = int(match.group(1), 0) - self.image_base
+                name = imports.get(target)
+                if name:
+                    return name[1] if isinstance(name, tuple) else name
 
         # call qword ptr [rip + disp]
         lower = op.lower()

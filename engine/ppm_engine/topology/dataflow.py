@@ -2,10 +2,13 @@
 Data flow analysis -- track argument values passed to API calls.
 
 Uses capstone to disassemble backward from call sites and track
-register assignments through the x64 Microsoft calling convention
-(rcx, rdx, r8, r9 for first 4 args, stack for the rest).
+register assignments for the x64 Microsoft calling convention and
+stack arguments for x86 cdecl/stdcall. Register-based x86 conventions
+(thiscall/fastcall) are not inferred.
 """
 from __future__ import annotations
+
+import re
 
 from typing import TYPE_CHECKING
 
@@ -50,7 +53,7 @@ def track_arguments(
     """Track argument values passed to a specific API at each call site.
 
     Disassembles backward from each call site to *target_addr* and
-    resolves register assignments for rcx, rdx, r8, r9.
+    resolves x64 register arguments or x86 stack arguments.
 
     Parameters:
         graph: The call graph containing function/call information.
@@ -74,7 +77,9 @@ def track_arguments(
     if raw_text is None:
         return {}
 
-    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    bitness = getattr(graph, "bitness", 64)
+    mode = capstone.CS_MODE_32 if bitness == 32 else capstone.CS_MODE_64
+    md = capstone.Cs(capstone.CS_ARCH_X86, mode)
     md.detail = False  # we parse operands manually for speed
 
     results: dict[int, list[dict]] = {}
@@ -104,7 +109,8 @@ def track_arguments(
                 continue
 
             # Walk backward from the call site to resolve arg registers
-            args = _resolve_args_backward(insns[:i], insn.address)
+            args = (_resolve_stack_args_backward(insns[:i]) if bitness == 32
+                    else _resolve_args_backward(insns[:i], insn.address))
             if args:
                 results[insn.address] = args
 
@@ -122,28 +128,22 @@ def _parse_call_target(insn, expected: int, graph: CallGraph) -> int:
     except (ValueError, TypeError):
         pass
 
-    # FF 15 [rip+disp]: IAT call -- resolve via import map
-    if "rip" in op.lower():
-        # Extract displacement
-        lower = op.lower()
-        disp = 0
-        if "+" in lower:
-            for part in lower.split("+"):
-                part = part.strip().rstrip("]").strip()
-                if part != "rip" and "ptr" not in part and not part.startswith("[") and "qword" not in part:
-                    try:
-                        disp = int(part, 0)
-                    except ValueError:
-                        pass
-        if disp:
-            iat_addr = insn.address + insn.size + disp
-            # Check if this IAT slot maps to our target
-            fn = graph.functions.get(iat_addr)
+    # x86 uses an absolute VA for the IAT slot, whereas graph keys are RVAs.
+    if getattr(graph, "bitness", 64) == 32:
+        match = re.fullmatch(r"(?:dword ptr )?\[(0x[0-9a-f]+)\]", op.lower())
+        if match:
+            slot = int(match.group(1), 0) - graph.image_base
+            fn = graph.functions.get(slot)
             if fn and fn.is_import:
-                # Find the actual import address
-                for addr, f in graph.functions.items():
-                    if f.is_import and f.import_name and addr == iat_addr:
-                        return addr
+                return slot
+
+    if "rip" in op.lower():
+        disp = _extract_rip_disp(op)
+        if disp is not None:
+            slot = insn.address + insn.size + disp
+            fn = graph.functions.get(slot)
+            if fn and fn.is_import:
+                return slot
 
     return 0
 
@@ -331,3 +331,77 @@ def track_all_interesting(
                 results[fn.import_name] = tracked
 
     return results
+
+
+def _resolve_stack_args_backward(insns: list) -> list[dict]:
+    """Best-effort x86 cdecl/stdcall arguments; offsets are relative to pre-call ESP.
+
+    Stop at calls and branches. Register-based thiscall/fastcall is not inferred.
+    """
+    slots = {}
+    delta = 0
+    window_start = max(0, len(insns) - 30)
+
+    def value_at(operand, before):
+        operand = operand.strip()
+        seen = set()
+        for prev in reversed(insns[window_start:before]):
+            if prev.mnemonic == "call" or prev.mnemonic.startswith("j"):
+                break
+            parts = [p.strip() for p in prev.op_str.split(",", 1)]
+            if len(parts) != 2 or parts[0] != operand:
+                continue
+            if prev.mnemonic == "xor" and parts[0] == parts[1]:
+                return "0", "zero"
+            if prev.mnemonic == "lea":
+                return "&" + parts[1], "address"
+            if prev.mnemonic != "mov":
+                break
+            operand = parts[1]
+            if operand in seen:
+                break
+            seen.add(operand)
+        if re.fullmatch(r"e(?:ax|bx|cx|dx|si|di|bp|sp)", operand):
+            return operand, "register"
+        return _classify_source(operand)
+
+    for index in range(len(insns) - 1, window_start - 1, -1):
+        insn = insns[index]
+        mn, ops = insn.mnemonic, insn.op_str
+        if mn == "call" or mn.startswith("j") or mn.startswith("ret") or mn == "leave":
+            break
+        if mn == "push":
+            if ops == "ebp":  # Do not report the frame pointer as an argument.
+                break
+            if delta >= 0 and delta % 4 == 0 and delta < 64 and delta not in slots:
+                slots[delta] = value_at(ops, index)
+            delta += 4
+        elif mn == "pop":
+            delta -= 4
+        elif mn in ("sub", "add"):
+            parts = [p.strip() for p in ops.split(",", 1)]
+            if len(parts) == 2 and parts[0] == "esp":
+                try:
+                    delta += int(parts[1], 0) * (1 if mn == "sub" else -1)
+                except ValueError:
+                    break
+        elif mn == "mov":
+            parts = [p.strip() for p in ops.split(",", 1)]
+            if len(parts) != 2:
+                continue
+            if parts[0] in ("esp", "ebp"):
+                break
+            match = re.fullmatch(r"(?:dword ptr )?\[esp(?: \+ (0x[0-9a-f]+|[0-9]+))?\]", parts[0])
+            if match:
+                offset = delta + int(match.group(1) or "0", 0)
+                if 0 <= offset < 64 and offset % 4 == 0 and offset not in slots:
+                    slots[offset] = value_at(parts[1], index)
+
+    args = []
+    for offset in range(0, 64, 4):
+        if offset not in slots:
+            break
+        value, source = slots[offset]
+        args.append({"arg": offset // 4, "reg": f"[esp+0x{offset:X}]",
+                     "value": value, "source": source})
+    return args
