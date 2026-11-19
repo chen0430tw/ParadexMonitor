@@ -16,6 +16,23 @@ PPM takes any compiled binary (.sys, .exe, .dll, .ocx, .ko, .so, .dylib, .lnk) a
 
 Non-binary formats (images, audio, text) are correctly identified and rejected -- no crashes on unexpected input.
 
+## Version 0.4.0
+
+- PE call graphs, pseudo-code, dataflow, and XOR-loop scans now select x86 or x64 decoding from PE headers.
+- x86 API calls resolve absolute IAT addresses and recover common cdecl/stdcall stack arguments.
+- Pseudo-code resolves mapped string addresses; XOR-loop detection requires XOR inside the loop.
+- Function boundaries and pseudo-code remain heuristic. Register-based x86 thiscall/fastcall arguments are not inferred.
+
+Install or upgrade the Python CLI:
+
+```bash
+python -m pip install --upgrade ppm-engine
+ppm --version
+ppm analyze application.exe
+```
+
+The Python package provides CLI analysis and a JSON engine, not a graphical desktop application.
+
 ## Quick Start
 
 ### Install Engine (Python)
